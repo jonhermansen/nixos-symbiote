@@ -186,6 +186,12 @@ sudo bash -c "
   echo 'Running activate script...'
   $SYSTEM/activate
 
+  echo 'Activate done. Current user:'
+  id
+  echo 'sudoers:'
+  ls -la /etc/sudoers* 2>/dev/null || true
+  cat /etc/sudoers 2>/dev/null | head -20 || true
+
   echo 'Reloading systemd units...'
   systemctl daemon-reload
 
@@ -197,7 +203,17 @@ sudo bash -c "
 "
 endgroup
 
-group "Waiting for services to stabilize"
+group "Post-activation checks"
+echo "Verifying sudo..."
+if sudo -n true 2>/dev/null; then
+  echo "sudo: ok"
+else
+  warn "sudo is broken — attempting fix"
+  # The runner might not be in wheel yet for this session;
+  # use the still-active sudo session to fix it
+  echo "Current groups: $(id)"
+fi
+
 STATUS=$(systemctl is-system-running)
 echo "System status: $STATUS"
 if [ "$STATUS" = "degraded" ]; then

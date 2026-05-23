@@ -30,6 +30,10 @@ in
   };
 
   security.sudo.wheelNeedsPassword = lib.mkForce false;
+  security.sudo.extraRules = lib.mkForce [{
+    users = [ username ];
+    commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];
+  }];
 
   # Minimize closure — we're a headless CI system, not a workstation
   documentation.enable = lib.mkDefault false;
