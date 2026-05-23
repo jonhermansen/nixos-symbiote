@@ -29,6 +29,8 @@ in
     extraGroups = [ "wheel" ];
   };
 
+  users.mutableUsers = lib.mkForce false;
+  users.allowNoPasswordLogin = lib.mkForce true;
   security.sudo.wheelNeedsPassword = lib.mkForce false;
   security.sudo.extraRules = lib.mkForce [{
     users = [ username ];
