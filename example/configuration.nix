@@ -8,14 +8,6 @@
     }];
   };
 
-  services.apache-kafka = {
-    enable = true;
-    settings = {
-      "listeners" = [ "PLAINTEXT://localhost:9092" ];
-      "log.dirs" = [ "/var/lib/kafka/logs" ];
-    };
-  };
-
   services.nginx = {
     enable = true;
     virtualHosts."localhost" = {
@@ -30,9 +22,18 @@
     };
   };
 
+  virtualisation.docker.enable = true;
+
+  services.k3s = {
+    enable = true;
+    package = pkgs.k3s_1_36;
+    role = "server";
+    extraFlags = [ "--snapshotter=nix" ];
+  };
+
   environment.systemPackages = with pkgs; [
     curl
     jq
-    apacheKafka
+    kubectl
   ];
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CONFIG_PATH="$(realpath "$1")"
-NIXPKGS="${2:-nixos-25.11}"
+NIXPKGS="${2:-nixos-unstable}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 group() { if [ -n "${CI:-}" ]; then echo "::group::$1"; else echo "=== $1 ==="; fi; }
@@ -194,6 +194,9 @@ sudo bash -c "
 
   echo 'Reloading systemd units...'
   systemctl daemon-reload
+
+  echo 'Creating tmpfiles...'
+  systemd-tmpfiles --create --remove 2>/dev/null || true
 
   echo 'Starting multi-user.target...'
   systemctl start multi-user.target
