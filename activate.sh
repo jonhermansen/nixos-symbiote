@@ -204,26 +204,28 @@ sudo bash -c "
 endgroup
 
 group "Post-activation checks"
-echo "Verifying sudo..."
-if sudo -n true 2>/dev/null; then
-  echo "sudo: ok"
-else
-  warn "sudo is broken — attempting fix"
-  # The runner might not be in wheel yet for this session;
-  # use the still-active sudo session to fix it
-  echo "Current groups: $(id)"
-fi
+export PATH="/run/wrappers/bin:/run/current-system/sw/bin:$PATH"
 
-STATUS=$(systemctl is-system-running)
+STATUS=$(systemctl is-system-running || true)
 echo "System status: $STATUS"
 if [ "$STATUS" = "degraded" ]; then
   warn "Some services failed to start:"
   systemctl --failed --no-pager
 fi
+
+echo "Verifying sudo..."
+if sudo -n true 2>/dev/null; then
+  echo "sudo: ok"
+else
+  warn "sudo not working (PAM config may need NixOS sudo binary)"
+  echo "Groups: $(id)"
+  echo "sudoers: $(cat /etc/sudoers 2>/dev/null | grep -v '^#' | grep -v '^$' || true)"
+fi
 endgroup
 
 if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "/run/wrappers/bin" >> "$GITHUB_PATH"
   echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
 else
-  echo "NixOS activated. Add /run/current-system/sw/bin to your PATH."
+  echo "NixOS activated. Add /run/wrappers/bin and /run/current-system/sw/bin to your PATH."
 fi
