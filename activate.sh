@@ -175,25 +175,29 @@ endgroup
 # --- Activate ---
 group "Activating NixOS"
 NIX_ENV="$(which nix-env)"
+sudo bash -c "
+  set -euo pipefail
+  echo 'Setting system profile...'
+  $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
 
-echo "Setting system profile..."
-sudo "$NIX_ENV" --profile /nix/var/nix/profiles/system --set "$SYSTEM"
+  echo 'Linking /run/current-system...'
+  ln -sfn /nix/var/nix/profiles/system /run/current-system
 
-echo "Linking /run/current-system..."
-sudo ln -sfn /nix/var/nix/profiles/system /run/current-system
+  echo 'Running activate script...'
+  $SYSTEM/activate
 
-echo "Running activate script..."
-sudo "$SYSTEM/activate" 2>&1
+  echo 'Reloading systemd units...'
+  systemctl daemon-reload
 
-echo "Reloading systemd units..."
-sudo systemctl daemon-reload
+  echo 'Starting multi-user.target...'
+  systemctl start multi-user.target
 
-echo "Starting multi-user.target..."
-sudo systemctl start multi-user.target
+  echo 'Waiting for services to stabilize...'
+  systemctl is-system-running --wait || true
+"
 endgroup
 
 group "Waiting for services to stabilize"
-sudo systemctl is-system-running --wait || true
 STATUS=$(systemctl is-system-running)
 echo "System status: $STATUS"
 if [ "$STATUS" = "degraded" ]; then
