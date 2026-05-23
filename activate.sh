@@ -70,6 +70,23 @@ echo "Protected units: ${PROTECTED_UNITS[*]}"
 echo ""
 echo "All running services:"
 systemctl list-units --type=service --state=running --no-pager --no-legend
+
+echo ""
+echo "Service dependency graph (multi-user.target):"
+systemctl list-dependencies multi-user.target --no-pager 2>/dev/null || true
+
+for UNIT in "${PROTECTED_UNITS[@]}"; do
+  echo ""
+  echo "Dependencies of $UNIT:"
+  systemctl list-dependencies "$UNIT" --no-pager 2>/dev/null || true
+  echo ""
+  echo "Unit file for $UNIT:"
+  systemctl cat "$UNIT" 2>/dev/null || true
+done
+
+echo ""
+echo "Network targets:"
+systemctl list-dependencies network-online.target --no-pager 2>/dev/null || true
 endgroup
 
 # --- Build ---
