@@ -84,9 +84,9 @@
                 required = true;
               };
               nixpkgs = {
-                description = "Nixpkgs revision (commit hash, branch, or tag)";
+                description = "Nixpkgs revision — defaults to flake.lock pin if empty";
                 required = false;
-                default = "nixos-25.11";
+                default = "";
               };
               cachix-name = {
                 description = "Cachix cache name (enables binary cache)";

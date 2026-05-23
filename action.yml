@@ -10,8 +10,8 @@ inputs:
     description: Path to your NixOS configuration.nix
     required: true
   nixpkgs:
-    default: nixos-25.11
-    description: Nixpkgs revision (commit hash, branch, or tag)
+    default: ''
+    description: "Nixpkgs revision \u2014 defaults to flake.lock pin if empty"
     required: false
 name: NixOS Symbiote
 runs:

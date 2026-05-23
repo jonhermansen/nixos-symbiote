@@ -2,8 +2,15 @@
 set -euo pipefail
 
 CONFIG_PATH="$(realpath "$1")"
-NIXPKGS="${2:-nixos-unstable}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -n "${2:-}" ]; then
+  NIXPKGS="$2"
+elif [ -f "$SCRIPT_DIR/flake.lock" ] && command -v jq >/dev/null; then
+  NIXPKGS=$(jq -r '.nodes.nixpkgs.locked.rev' "$SCRIPT_DIR/flake.lock")
+else
+  NIXPKGS="nixos-unstable"
+fi
 
 group() { if [ -n "${CI:-}" ]; then echo "::group::$1"; else echo "=== $1 ==="; fi; }
 endgroup() { if [ -n "${CI:-}" ]; then echo "::endgroup::"; fi; }
