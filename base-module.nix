@@ -31,9 +31,16 @@ in
 
   security.sudo.wheelNeedsPassword = lib.mkForce false;
 
+  # Minimize closure — we're a headless CI system, not a workstation
   documentation.enable = lib.mkDefault false;
   xdg.icons.enable = lib.mkDefault false;
   xdg.sounds.enable = lib.mkDefault false;
   xdg.mime.enable = lib.mkDefault false;
+  nix.enable = lib.mkDefault false;
+  boot.supportedFilesystems = lib.mkDefault [ ];
+  system.disableInstallerTools = lib.mkDefault true;
+  programs.command-not-found.enable = lib.mkDefault false;
+  environment.defaultPackages = lib.mkDefault [ ];
+  fonts.fontconfig.enable = lib.mkDefault false;
 
 }

@@ -104,6 +104,7 @@ SYSTEM=$(nix-build "$SCRIPT_DIR/system-expression.nix" \
   --argstr userUid "$USER_UID" \
   --no-out-link)
 echo "Built: $SYSTEM"
+echo "Closure size: $(nix path-info -rSh "$SYSTEM" 2>/dev/null | tail -1 || echo "unknown")"
 endgroup
 
 # --- Protect ancestor processes, stop everything else ---
