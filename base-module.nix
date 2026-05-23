@@ -31,4 +31,9 @@ in
 
   security.sudo.wheelNeedsPassword = lib.mkForce false;
 
+  documentation.enable = lib.mkDefault false;
+  xdg.icons.enable = lib.mkDefault false;
+  xdg.sounds.enable = lib.mkDefault false;
+  xdg.mime.enable = lib.mkDefault false;
+
 }

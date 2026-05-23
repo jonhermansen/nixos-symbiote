@@ -49,10 +49,7 @@ echo "Ancestor PIDs: ${ANCESTOR_PIDS[*]}"
 
 PROTECTED_UNITS=()
 for P in "${ANCESTOR_PIDS[@]}"; do
-  UNIT=$(systemctl status "$P" 2>/dev/null | grep -oP '(?<=─ )\S+\.service' | head -1 || true)
-  if [ -z "$UNIT" ]; then
-    UNIT=$(cat /proc/$P/cgroup 2>/dev/null | grep -oP '[^/]+\.service$' | head -1 || true)
-  fi
+  UNIT=$(grep -o '[^/]*\.service' /proc/$P/cgroup 2>/dev/null | head -1 || true)
   if [ -n "$UNIT" ]; then
     PROTECTED_UNITS+=("$UNIT")
     echo "  PID $P -> $UNIT (PROTECTED)"
