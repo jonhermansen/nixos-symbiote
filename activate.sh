@@ -114,6 +114,37 @@ if [ ${#STOP_LIST[@]} -gt 0 ]; then
   echo "Stopping ${#STOP_LIST[@]} services: ${STOP_LIST[*]}"
   sudo systemctl stop "${STOP_LIST[@]}" 2>/dev/null || true
 fi
+
+# Preserve protected unit files in /run so they survive /etc takeover
+for UNIT in "${PROTECTED_UNITS[@]}"; do
+  SRC="/etc/systemd/system/${UNIT}"
+  if [ -f "$SRC" ]; then
+    echo "Preserving $UNIT to /run/systemd/system/"
+    sudo cp "$SRC" "/run/systemd/system/${UNIT}"
+  fi
+  if [ -d "/etc/systemd/system/${UNIT}.d" ]; then
+    sudo mkdir -p "/run/systemd/system/${UNIT}.d"
+    sudo cp -a "/etc/systemd/system/${UNIT}.d/." "/run/systemd/system/${UNIT}.d/"
+  fi
+done
+
+# Clear /etc paths that conflict with NixOS symlinks
+ETC_CONFLICTS=(
+  /etc/systemd/system
+  /etc/systemd/user
+  /etc/systemd/system-generators
+  /etc/dbus-1
+  /etc/fonts
+  /etc/terminfo
+)
+sudo mkdir -p /etc.bak
+for DIR in "${ETC_CONFLICTS[@]}"; do
+  if [ -d "$DIR" ] && [ ! -L "$DIR" ]; then
+    echo "Moving $DIR -> /etc.bak/"
+    sudo mv "$DIR" "/etc.bak/$(echo "$DIR" | tr '/' '_')"
+  fi
+done
+sudo systemctl daemon-reload
 endgroup
 
 # --- Activate ---
