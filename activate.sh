@@ -161,7 +161,8 @@ sudo bash -c "
   $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
   ln -sfn /nix/var/nix/profiles/system /run/current-system
   $SYSTEM/activate
-  $SYSTEM/bin/switch-to-configuration switch
+  systemctl daemon-reload
+  systemctl start multi-user.target
 "
 endgroup
 
