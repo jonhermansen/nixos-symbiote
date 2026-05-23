@@ -1,0 +1,29 @@
+#+TITLE: nixos-symbiote
+
+Activate NixOS on a running systemd system without rebooting.
+
+Pass a configuration.nix describing the packages and services you
+want. The action builds a NixOS closure, activates it, waits for
+services to come up, and hands control back to your pipeline.
+
+* GitHub Action
+
+#+begin_src yaml
+- uses: jonhermansen/nixos-symbiote@master
+  with:
+    configuration: ./my-config.nix
+#+end_src
+
+Optionally pass =nixpkgs= to pin a nixpkgs revision and =cachix-name=
+to use a binary cache.
+
+* Standalone
+
+#+begin_src sh
+nix run github:jonhermansen/nixos-symbiote -- ./my-config.nix
+#+end_src
+
+* Limitations
+
+The kernel and PID 1 are still the host's. This is not a full
+NixOS installation.

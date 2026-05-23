@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_PATH="$(realpath "$1")"
+NIXPKGS="${2:-nixos-25.11}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+group() { if [ -n "${CI:-}" ]; then echo "::group::$1"; else echo "=== $1 ==="; fi; }
+endgroup() { if [ -n "${CI:-}" ]; then echo "::endgroup::"; fi; }
+warn() { if [ -n "${CI:-}" ]; then echo "::warning::$1"; else echo "WARNING: $1"; fi; }
+
+# --- Safety check ---
+if [ -z "${CI:-}" ]; then
+  echo "WARNING: This will activate NixOS on top of your running system."
+  echo "It will stop most services and replace /etc management."
+  echo ""
+  read -rp "Are you sure? [y/N] " confirm
+  if [[ "$confirm" != [yY] ]]; then
+    echo "Aborted."
+    exit 1
+  fi
+fi
+
+# --- Detect system ---
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+ROOT_FSTYPE=$(findmnt -n -o FSTYPE /)
+NIX_DEV=$(findmnt -n -o SOURCE /nix 2>/dev/null || echo "")
+NIX_FSTYPE=$(findmnt -n -o FSTYPE /nix 2>/dev/null || echo "")
+DNS_SERVERS=$(resolvectl status 2>/dev/null \
+  | grep -oP 'DNS Servers:\s*\K.*' \
+  | head -1 \
+  || echo "1.1.1.1")
+USERNAME="$(whoami)"
+USER_HOME="$HOME"
+USER_UID="$(id -u)"
+
+echo "Detected root: device=$ROOT_DEV fsType=$ROOT_FSTYPE"
+echo "Detected user: $USERNAME (uid=$USER_UID, home=$USER_HOME)"
+
+# --- Audit: identify what keeps us alive ---
+group "Auditing process tree"
+ANCESTOR_PIDS=()
+PID=$$
+while [ "$PID" -gt 1 ]; do
+  ANCESTOR_PIDS+=("$PID")
+  PID=$(awk '{print $4}' /proc/$PID/stat 2>/dev/null || echo 0)
+done
+echo "Ancestor PIDs: ${ANCESTOR_PIDS[*]}"
+
+PROTECTED_UNITS=()
+for P in "${ANCESTOR_PIDS[@]}"; do
+  UNIT=$(systemctl status "$P" 2>/dev/null | grep -oP '(?<=─ )\S+\.service' | head -1 || true)
+  if [ -z "$UNIT" ]; then
+    UNIT=$(cat /proc/$P/cgroup 2>/dev/null | grep -oP '[^/]+\.service$' | head -1 || true)
+  fi
+  if [ -n "$UNIT" ]; then
+    PROTECTED_UNITS+=("$UNIT")
+    echo "  PID $P -> $UNIT (PROTECTED)"
+  else
+    echo "  PID $P -> (no unit)"
+  fi
+done
+PROTECTED_UNITS=($(printf '%s\n' "${PROTECTED_UNITS[@]}" | sort -u))
+echo "Protected units: ${PROTECTED_UNITS[*]}"
+
+echo ""
+echo "All running services:"
+systemctl list-units --type=service --state=running --no-pager --no-legend
+endgroup
+
+# --- Build ---
+group "Building NixOS system closure"
+SYSTEM=$(nix-build "$SCRIPT_DIR/system-expression.nix" \
+  --argstr configPath "$CONFIG_PATH" \
+  --argstr nixpkgsSrc "$NIXPKGS" \
+  --argstr rootDevice "$ROOT_DEV" \
+  --argstr rootFsType "$ROOT_FSTYPE" \
+  --argstr nixDevice "${NIX_DEV:-}" \
+  --argstr nixFsType "${NIX_FSTYPE:-}" \
+  --argstr dnsServers "$DNS_SERVERS" \
+  --argstr username "$USERNAME" \
+  --argstr userHome "$USER_HOME" \
+  --argstr userUid "$USER_UID" \
+  --no-out-link)
+echo "Built: $SYSTEM"
+endgroup
+
+# --- Protect ancestor processes, stop everything else ---
+group "Preparing system"
+# Mark protected units so switch-to-configuration won't stop them
+for UNIT in "${PROTECTED_UNITS[@]}"; do
+  echo "Shielding $UNIT"
+  sudo mkdir -p "/etc/systemd/system/${UNIT}.d"
+  printf '[Unit]\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
+    | sudo tee "/etc/systemd/system/${UNIT}.d/protect.conf" >/dev/null
+done
+sudo systemctl daemon-reload
+
+# Stop all non-essential services
+STOP_LIST=()
+while IFS= read -r UNIT; do
+  UNIT=$(echo "$UNIT" | awk '{print $1}')
+  DOMINATED=false
+  for P in "${PROTECTED_UNITS[@]}"; do
+    if [ "$UNIT" = "$P" ]; then DOMINATED=true; break; fi
+  done
+  # Keep systemd-critical services
+  case "$UNIT" in
+    systemd-*|dbus*|nix-daemon*) DOMINATED=true ;;
+  esac
+  if ! $DOMINATED; then
+    STOP_LIST+=("$UNIT")
+  fi
+done < <(systemctl list-units --type=service --state=running --no-pager --no-legend)
+
+if [ ${#STOP_LIST[@]} -gt 0 ]; then
+  echo "Stopping ${#STOP_LIST[@]} services: ${STOP_LIST[*]}"
+  sudo systemctl stop "${STOP_LIST[@]}" 2>/dev/null || true
+fi
+endgroup
+
+# --- Activate ---
+group "Activating NixOS"
+NIX_ENV="$(which nix-env)"
+sudo bash -c "
+  $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
+  ln -sfn /nix/var/nix/profiles/system /run/current-system
+  $SYSTEM/activate
+  $SYSTEM/bin/switch-to-configuration switch
+"
+endgroup
+
+group "Waiting for services to stabilize"
+sudo systemctl is-system-running --wait || true
+STATUS=$(systemctl is-system-running)
+echo "System status: $STATUS"
+if [ "$STATUS" = "degraded" ]; then
+  warn "Some services failed to start:"
+  systemctl --failed --no-pager
+fi
+endgroup
+
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
+else
+  echo "NixOS activated. Add /run/current-system/sw/bin to your PATH."
+fi
