@@ -175,13 +175,21 @@ endgroup
 # --- Activate ---
 group "Activating NixOS"
 NIX_ENV="$(which nix-env)"
-sudo bash -c "
-  $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
-  ln -sfn /nix/var/nix/profiles/system /run/current-system
-  $SYSTEM/activate
-  systemctl daemon-reload
-  systemctl start multi-user.target
-"
+
+echo "Setting system profile..."
+sudo "$NIX_ENV" --profile /nix/var/nix/profiles/system --set "$SYSTEM"
+
+echo "Linking /run/current-system..."
+sudo ln -sfn /nix/var/nix/profiles/system /run/current-system
+
+echo "Running activate script..."
+sudo "$SYSTEM/activate" 2>&1
+
+echo "Reloading systemd units..."
+sudo systemctl daemon-reload
+
+echo "Starting multi-user.target..."
+sudo systemctl start multi-user.target
 endgroup
 
 group "Waiting for services to stabilize"
