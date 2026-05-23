@@ -21,6 +21,13 @@ if [ -z "${CI:-}" ]; then
   fi
 fi
 
+# --- Preflight checks ---
+[ "$(uname -s)" = "Linux" ] || { echo "Requires Linux."; exit 1; }
+[ -d /run/systemd/system ] || { echo "Requires systemd."; exit 1; }
+[ ! -f /etc/NIXOS ] || { echo "Already NixOS. Nothing to do."; exit 1; }
+command -v nix-build >/dev/null || { echo "Requires Nix. Install it first."; exit 1; }
+sudo -n true 2>/dev/null || { echo "Requires passwordless sudo."; exit 1; }
+
 # --- Detect system ---
 ROOT_DEV=$(findmnt -n -o SOURCE /)
 ROOT_FSTYPE=$(findmnt -n -o FSTYPE /)
