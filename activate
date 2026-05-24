@@ -36,7 +36,7 @@ echo "root=$ROOT_DEV ($ROOT_FSTYPE) user=$(whoami) uid=$(id -u)"
 
 # walk ancestor chain to find systemd units that must survive isolate
 readarray -t PROTECTED < <(perl -e '
-  my (%u, $pid) = ((), getppid());
+  my %u; my $pid = getppid();
   while ($pid > 1) {
     if (open my $fh, "<", "/proc/$pid/cgroup") {
       while (<$fh>) { $u{$1}++ && last if m{/([^/]+\.(service|scope|slice))\s*$} }
@@ -46,6 +46,7 @@ readarray -t PROTECTED < <(perl -e '
   }
   print "$_\n" for sort keys %u;
 ')
+[ ${#PROTECTED[@]} -gt 0 ] || { echo "No ancestor units found — isolate would kill us."; exit 1; }
 echo "Protected: ${PROTECTED[*]}"
 
 # build
