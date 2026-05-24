@@ -98,7 +98,7 @@ endgroup
 
 # --- Build ---
 group "Building NixOS system closure"
-SYSTEM=$(nix-build "$SCRIPT_DIR/system-expression.nix" \
+SYSTEM=$(nix-build "$SCRIPT_DIR/system.nix" \
   --argstr configPath "$CONFIG_PATH" \
   --argstr nixpkgsSrc "$NIXPKGS" \
   --argstr rootDevice "$ROOT_DEV" \
