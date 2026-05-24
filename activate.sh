@@ -222,14 +222,16 @@ export PATH="/run/wrappers/bin:/run/current-system/sw/bin:$PATH"
 STATUS=$(systemctl is-system-running || true)
 echo "System status: $STATUS"
 if [ "$STATUS" = "degraded" ]; then
-  warn "Some services failed to start:"
+  echo "Failed services:"
   systemctl --failed --no-pager
+  exit 1
 fi
 
 echo "Verifying sudo..."
 echo "Wrappers: $(ls -la /run/wrappers/bin/sudo 2>&1)"
 echo "Mount: $(mount | grep wrappers)"
-sudo -n true 2>&1 && echo "sudo: ok" || warn "sudo not working"
+sudo -n true 2>&1 || exit 1
+echo "sudo: ok"
 endgroup
 
 if [ -n "${GITHUB_PATH:-}" ]; then
