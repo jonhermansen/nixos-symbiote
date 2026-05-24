@@ -3,15 +3,9 @@ use strict;
 use warnings;
 use JSON::PP;
 use File::Basename;
-use File::Copy qw(copy);
 use Cwd 'abs_path';
 
-sub run  { system(@_) == 0 or die "failed: @_\n" }
-sub cap  { chomp(my $o = `$_[0]`); $o }
-
-# resolve sudo once — execvp can't always find it after nix-build
-my $SUDO = cap('which sudo') || '/usr/bin/sudo';
-sub sudo { run($SUDO, @_) }
+sub cap { chomp(my $o = `$_[0]`); $o }
 
 my $config = abs_path($ARGV[0] // die "Usage: $0 <configuration.nix> [nixpkgs-rev]\n");
 my $dir    = dirname(abs_path(__FILE__));
@@ -84,72 +78,85 @@ my $system = cap(join ' ',
 die "nix-build failed\n" unless $system;
 print "Built: $system (", cap("nix path-info -rSh '$system' 2>/dev/null | tail -1") || '?', ")\n";
 
-# shield ancestor units from isolate
-for my $unit (@protected) {
-  sudo('mkdir', '-p', "/etc/systemd/system/${unit}.d");
-  open my $fh, '|-', 'sudo', 'tee', "/etc/systemd/system/${unit}.d/protect.conf"
-    or die "tee: $!\n";
-  print $fh "[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n";
-  close $fh;
-}
-sudo('systemctl', 'daemon-reload');
-sudo('systemctl', 'isolate', 'rescue.target');
-
-# preserve protected units in /run (survives /etc takeover)
-for my $unit (@protected) {
-  my $src = "/etc/systemd/system/$unit";
-  sudo('cp', $src, "/run/systemd/system/$unit") if -f $src;
-  if (-d "${src}.d") {
-    sudo('mkdir', '-p', "/run/systemd/system/${unit}.d");
-    sudo('cp', '-a', "${src}.d/.", "/run/systemd/system/${unit}.d/");
-  }
-}
-
-# clear host paths that conflict with NixOS
-sudo('mkdir', '-p', '/etc.bak');
-for my $d (qw(/etc/systemd/system /etc/systemd/user /etc/systemd/system-generators
-              /etc/dbus-1 /etc/fonts /etc/terminfo)) {
-  if (-d $d && !-l $d) {
-    (my $bak = $d) =~ s{/}{_}g;
-    sudo('mv', $d, "/etc.bak/$bak");
-  }
-}
-sudo('mv', '/lib64', '/lib64.bak') if -e '/lib64' || -l '/lib64';
-sudo('systemctl', 'daemon-reload');
-
-# activate
 my $nix_env  = cap('which nix-env');
 my $ld_paths = cap(q{find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | grep -v '^#' | tr '\n' ' '});
 
-my @steps = (
-  "$nix_env --profile /nix/var/nix/profiles/system --set $system",
-  "ln -sfn /nix/var/nix/profiles/system /run/current-system",
-  "$system/activate",
-  "ldconfig $ld_paths",
-  (map { "[ -d $_ ] && mv $_ ${_}.bak" }
-    qw(/usr/lib/systemd/system /usr/lib/systemd/user
-       /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators
-       /usr/lib/tmpfiles.d /lib/systemd/system)),
-  "/run/current-system/sw/bin/systemctl daemon-reload",
-  "/run/current-system/sw/bin/systemd-tmpfiles --create --remove",
-  "/run/current-system/sw/bin/systemctl start multi-user.target",
-  "/run/current-system/sw/bin/systemctl is-system-running --wait || true",
-);
+# generate the shield drop-ins
+my $shield_cmds = join("\n", map {
+  my $d = "/etc/systemd/system/${_}.d";
+  "mkdir -p '$d'\n" .
+  "printf '[Unit]\\nIgnoreOnIsolate=yes\\nX-StopOnRemoval=false\\nX-StopOnReconfiguration=false\\n' > '$d/protect.conf'"
+} @protected);
 
+# generate unit preservation commands
+my $preserve_cmds = join("\n", map {
+  my $s = "/etc/systemd/system/$_";
+  "[ -f '$s' ] && cp '$s' '/run/systemd/system/$_'\n" .
+  "[ -d '${s}.d' ] && mkdir -p '/run/systemd/system/${_}.d' && cp -a '${s}.d/.' '/run/systemd/system/${_}.d/'"
+} @protected);
+
+# etc dirs to move out of NixOS's way
+my @etc_conflicts = qw(/etc/systemd/system /etc/systemd/user /etc/systemd/system-generators
+                        /etc/dbus-1 /etc/fonts /etc/terminfo);
+my $etc_cmds = join("\n", map {
+  my $d = $_;
+  (my $bak = $d) =~ s{/}{_}g;
+  "[ -d '$d' ] && [ ! -L '$d' ] && mv '$d' '/etc.bak/$bak'"
+} @etc_conflicts);
+
+# host systemd dirs to move before daemon-reload
+my @host_systemd = qw(/usr/lib/systemd/system /usr/lib/systemd/user
+                       /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators
+                       /usr/lib/tmpfiles.d /lib/systemd/system);
+my $host_cmds = join("\n", map { "[ -d $_ ] && mv $_ ${_}.bak" } @host_systemd);
+
+# single sudo bash block for all privileged operations
 open my $sh, '|-', 'sudo', 'bash' or die "sudo bash: $!\n";
-print $sh "set -euo pipefail\n";
-print $sh "$_\n" for @steps;
-close $sh or die "activation failed (exit $?)\n";
+print $sh <<SCRIPT;
+set -euo pipefail
 
-# verify
-$ENV{PATH} = "/run/wrappers/bin:/run/current-system/sw/bin:$ENV{PATH}";
-my $status = cap('sudo systemctl is-system-running') || 'unknown';
-print "System: $status\n";
-if ($status ne 'running') {
-  system('sudo', 'systemctl', '--failed', '--no-pager');
-  exit 1;
-}
-run('sudo', '-n', 'true');
+echo "Shielding protected units..."
+$shield_cmds
+systemctl daemon-reload
+
+echo "Isolating to rescue.target..."
+systemctl isolate rescue.target
+
+echo "Preserving protected units..."
+$preserve_cmds
+
+echo "Clearing host paths..."
+mkdir -p /etc.bak
+$etc_cmds
+[ -e /lib64 ] || [ -L /lib64 ] && mv /lib64 /lib64.bak || true
+systemctl daemon-reload
+
+echo "Activating NixOS..."
+$nix_env --profile /nix/var/nix/profiles/system --set $system
+ln -sfn /nix/var/nix/profiles/system /run/current-system
+$system/activate
+ldconfig $ld_paths
+
+echo "Clearing host systemd artifacts..."
+$host_cmds
+
+echo "Starting NixOS services..."
+/run/current-system/sw/bin/systemctl daemon-reload
+/run/current-system/sw/bin/systemd-tmpfiles --create --remove
+/run/current-system/sw/bin/systemctl start multi-user.target
+/run/current-system/sw/bin/systemctl is-system-running --wait || true
+
+echo "Verifying..."
+STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
+echo "System: \$STATUS"
+if [ "\$STATUS" != "running" ]; then
+  /run/current-system/sw/bin/systemctl --failed --no-pager
+  exit 1
+fi
+sudo -n true || exit 1
+echo "sudo: ok"
+SCRIPT
+close $sh or die "activation failed\n";
 
 if ($ENV{GITHUB_PATH}) {
   open my $fh, '>>', $ENV{GITHUB_PATH} or die $!;
