@@ -49,8 +49,6 @@ in
     programs.command-not-found.enable = lib.mkDefault false;
     environment.defaultPackages = lib.mkDefault [ ];
     fonts.fontconfig.enable = lib.mkDefault false;
-    # Point the standard ld-linux path at a real linker, not the stub,
-    # so host binaries keep working alongside NixOS
-    environment.ldso = lib.mkForce "${pkgs.stdenv.cc.bintools.dynamicLinker}";
+    environment.ldso = lib.mkForce null;
   })
 ]).toplevel
