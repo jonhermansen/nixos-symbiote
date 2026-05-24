@@ -21,23 +21,22 @@ $nixpkgs ||= 'nixos-unstable';
 sub run { system(@_) == 0 or die "failed: @_\n" }
 sub cap { chomp(my $o = `$_[0]`); $o }
 
-# safety check
-if (!$ENV{CI}) {
-  print "This will activate NixOS on top of your running system.\nAre you sure? [y/N] ";
-  chomp(my $c = <STDIN>);
-  exit 1 unless $c =~ /^[yY]$/;
-}
-
 # preflight
 die "Requires Linux\n"    unless $^O eq 'linux';
 die "Requires systemd\n"  unless -d '/run/systemd/system';
 die "Already NixOS\n"     if -f '/etc/NIXOS';
 die "Requires Nix\n"      unless cap('which nix-build 2>/dev/null');
 
+if (!$ENV{CI}) {
+  print "This will activate NixOS on top of your running system.\nAre you sure? [y/N] ";
+  chomp(my $c = <STDIN>);
+  exit 1 unless $c =~ /^[yY]$/;
+}
+
 # re-exec as root if needed
 if ($> != 0) {
   die "Requires passwordless sudo\n" unless system('sudo -n true 2>/dev/null') == 0;
-  exec('sudo', $^X, $0, @ARGV) or die "exec sudo: $!\n";
+  exec('sudo', '--preserve-env=CI,GITHUB_PATH,GITHUB_ACTIONS', $^X, $0, @ARGV) or die "exec sudo: $!\n";
 }
 
 # detect system
