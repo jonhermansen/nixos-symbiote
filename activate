@@ -80,7 +80,8 @@ done
 systemctl daemon-reload
 
 echo "Isolating to rescue.target..."
-systemctl isolate rescue.target
+systemctl isolate --no-block rescue.target
+sleep 3
 
 # preserve protected units in /run so they survive /etc takeover
 for UNIT in ${PROTECTED[*]}; do
