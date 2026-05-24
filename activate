@@ -66,6 +66,7 @@ echo "Built: $SYSTEM ($(nix path-info -rSh "$SYSTEM" 2>/dev/null | tail -1))"
 
 NIX_ENV=$(which nix-env)
 LD_PATHS=$(find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | grep -v '^#' | tr '\n' ' ' || true)
+HOST_LINKER=$(readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null || true)
 
 # everything below needs root — one sudo bash to avoid exec-after-nix-build issues
 sudo bash <<ROOTSHELL
@@ -141,11 +142,18 @@ echo "==="
 
 echo "Starting NixOS services..."
 /run/current-system/sw/bin/systemctl daemon-reload
-/run/current-system/sw/bin/systemd-tmpfiles --create --remove
-echo "=== ld.so.conf after tmpfiles ==="
-cat /etc/ld.so.conf || true
-ls /etc/ld.so.conf.d/ || true
+echo "=== /lib64 before tmpfiles ==="
+/run/current-system/sw/bin/ls -la /lib64/ || true
 echo "==="
+/run/current-system/sw/bin/systemd-tmpfiles --create --remove
+echo "=== /lib64 after tmpfiles ==="
+/run/current-system/sw/bin/ls -la /lib64/ || true
+echo "==="
+if [ -n "$HOST_LINKER" ] && [ -f "$HOST_LINKER" ]; then
+  /run/current-system/sw/bin/mkdir -p /lib64
+  /run/current-system/sw/bin/ln -sf "$HOST_LINKER" /lib64/ld-linux-x86-64.so.2
+  echo "Restored host linker: /lib64/ld-linux-x86-64.so.2 -> $HOST_LINKER"
+fi
 ldconfig $LD_PATHS
 /run/current-system/sw/bin/systemctl start multi-user.target
 /run/current-system/sw/bin/systemctl is-system-running --wait || true
