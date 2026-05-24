@@ -113,6 +113,13 @@ ln -sfn /nix/var/nix/profiles/system "$NEW_ROOT/run/current-system"
 NIXOS_ACTION=boot NIXOS_INSTALL_BOOTLOADER=0 \
   chroot "$NEW_ROOT" /nix/var/nix/profiles/system/activate 2>&1 || true
 
+# systemd checks path_is_os_tree on /run/nextroot before pivoting
+[ -e "$NEW_ROOT/etc/os-release" ] || touch "$NEW_ROOT/etc/os-release"
+
+# verify new root looks like an OS tree
+echo "os-release: $(cat "$NEW_ROOT/etc/os-release" 2>&1 | head -3)"
+ls -la "$NEW_ROOT/etc/os-release" "$NEW_ROOT/usr/lib/systemd/systemd"
+
 # unmount chroot filesystems (systemd will re-mount after pivot)
 umount -l "$NEW_ROOT/run"
 umount -l "$NEW_ROOT/sys"
