@@ -3,6 +3,9 @@ use strict;
 use warnings;
 use JSON::PP;
 use File::Basename;
+use File::Copy qw(move copy);
+use File::Path qw(make_path rmtree);
+use File::Find;
 use Cwd 'abs_path';
 
 my $config = abs_path($ARGV[0] // die "Usage: $0 <configuration.nix> [nixpkgs-rev]\n");
@@ -15,9 +18,8 @@ if ($nixpkgs eq '' && -f "$dir/flake.lock") {
 }
 $nixpkgs ||= 'nixos-unstable';
 
-sub run  { system(@_) == 0 or die "failed: @_\n" }
-sub cap  { chomp(my $o = `$_[0]`); $o }
-sub sudo { run('sudo', @_) }
+sub run { system(@_) == 0 or die "failed: @_\n" }
+sub cap { chomp(my $o = `$_[0]`); $o }
 
 # safety check
 if (!$ENV{CI}) {
@@ -27,20 +29,26 @@ if (!$ENV{CI}) {
 }
 
 # preflight
-die "Requires Linux\n"           unless $^O eq 'linux';
-die "Requires systemd\n"         unless -d '/run/systemd/system';
-die "Already NixOS\n"            if -f '/etc/NIXOS';
-die "Requires Nix\n"             unless cap('which nix-build 2>/dev/null');
-die "Requires passwordless sudo\n" unless system('sudo -n true 2>/dev/null') == 0;
+die "Requires Linux\n"    unless $^O eq 'linux';
+die "Requires systemd\n"  unless -d '/run/systemd/system';
+die "Already NixOS\n"     if -f '/etc/NIXOS';
+die "Requires Nix\n"      unless cap('which nix-build 2>/dev/null');
+
+# re-exec as root if needed
+if ($> != 0) {
+  die "Requires passwordless sudo\n" unless system('sudo -n true 2>/dev/null') == 0;
+  exec('sudo', $^X, $0, @ARGV) or die "exec sudo: $!\n";
+}
 
 # detect system
-my $root_dev  = cap('findmnt -n -o SOURCE /');
-my $root_fs   = cap('findmnt -n -o FSTYPE /');
-my $nix_dev   = cap('findmnt -n -o SOURCE /nix 2>/dev/null') // '';
-my $nix_fs    = cap('findmnt -n -o FSTYPE /nix 2>/dev/null') // '';
-my $dns       = cap(q{resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers:[[:space:]]*//p' | head -1}) || '1.1.1.1';
-my $user      = cap('whoami');
-my $uid       = cap('id -u');
+my $root_dev = cap('findmnt -n -o SOURCE /');
+my $root_fs  = cap('findmnt -n -o FSTYPE /');
+my $nix_dev  = cap('findmnt -n -o SOURCE /nix 2>/dev/null') // '';
+my $nix_fs   = cap('findmnt -n -o FSTYPE /nix 2>/dev/null') // '';
+my $dns      = cap(q{resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers:[[:space:]]*//p' | head -1}) || '1.1.1.1';
+my $user     = getpwuid($ENV{SUDO_UID} // $<) || 'root';
+my $uid      = $ENV{SUDO_UID} // $<;
+my $home     = $ENV{SUDO_HOME} // (getpwuid($uid))[7] // "/home/$user";
 
 print "root=$root_dev ($root_fs) user=$user uid=$uid\n";
 
@@ -65,58 +73,55 @@ my @protected = sort keys %protected;
 print "Protected: @protected\n";
 
 # build
-my %args = (
-  configPath => $config,      nixpkgsSrc => $nixpkgs,
-  rootDevice => $root_dev,    rootFsType => $root_fs,
-  nixDevice  => $nix_dev,     nixFsType  => $nix_fs,
-  dnsServers => $dns,         username   => $user,
-  userHome   => $ENV{HOME},   userUid    => $uid,
+my %nix_args = (
+  configPath => $config,   nixpkgsSrc => $nixpkgs,
+  rootDevice => $root_dev, rootFsType => $root_fs,
+  nixDevice  => $nix_dev,  nixFsType  => $nix_fs,
+  dnsServers => $dns,      username   => $user,
+  userHome   => $home,     userUid    => $uid,
 );
 my $system = cap(join ' ',
   'nix-build', "'$dir/system.nix'",
-  (map { "--argstr $_ '$args{$_}'" } qw(configPath nixpkgsSrc rootDevice rootFsType nixDevice nixFsType dnsServers username userHome userUid)),
+  (map { "--argstr $_ '$nix_args{$_}'" } sort keys %nix_args),
   '--no-out-link',
 );
 die "nix-build failed\n" unless $system;
-my $size = cap("nix path-info -rSh '$system' 2>/dev/null | tail -1") || '?';
-print "Built: $system ($size)\n";
+print "Built: $system (", cap("nix path-info -rSh '$system' 2>/dev/null | tail -1") || '?', ")\n";
 
 # shield ancestor units from isolate
 for my $unit (@protected) {
-  sudo('mkdir', '-p', "/etc/systemd/system/${unit}.d");
-  open my $fh, '|-', 'sudo', 'tee', "/etc/systemd/system/${unit}.d/protect.conf"
-    or die "tee: $!\n";
+  my $drop_in = "/etc/systemd/system/${unit}.d";
+  make_path($drop_in);
+  open my $fh, '>', "$drop_in/protect.conf" or die $!;
   print $fh "[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n";
-  close $fh;
 }
-sudo('systemctl', 'daemon-reload');
-sudo('systemctl', 'isolate', 'rescue.target');
+run('systemctl', 'daemon-reload');
+run('systemctl', 'isolate', 'rescue.target');
 
 # preserve protected units in /run (survives /etc takeover)
 for my $unit (@protected) {
   my $src = "/etc/systemd/system/$unit";
-  sudo('cp', $src, "/run/systemd/system/$unit") if -f $src;
+  copy($src, "/run/systemd/system/$unit") if -f $src;
   if (-d "${src}.d") {
-    sudo('mkdir', '-p', "/run/systemd/system/${unit}.d");
-    sudo('cp', '-a', "${src}.d/.", "/run/systemd/system/${unit}.d/");
+    make_path("/run/systemd/system/${unit}.d");
+    system('cp', '-a', "${src}.d/.", "/run/systemd/system/${unit}.d/");
   }
 }
 
 # clear host paths that conflict with NixOS
-sudo('mkdir', '-p', '/etc.bak');
+make_path('/etc.bak');
 for my $d (qw(/etc/systemd/system /etc/systemd/user /etc/systemd/system-generators
               /etc/dbus-1 /etc/fonts /etc/terminfo)) {
   if (-d $d && !-l $d) {
     (my $bak = $d) =~ s{/}{_}g;
-    sudo('mv', $d, "/etc.bak/$bak");
+    rename $d, "/etc.bak/$bak" or warn "mv $d: $!\n";
   }
 }
-# NixOS needs /lib64 as a symlink for the dynamic linker
-sudo('mv', '/lib64', '/lib64.bak') if -d '/lib64' && !-l '/lib64';
-sudo('systemctl', 'daemon-reload');
+rename '/lib64', '/lib64.bak';
+run('systemctl', 'daemon-reload');
 
 # activate
-my $nix_env = cap('which nix-env');
+my $nix_env  = cap('which nix-env');
 my $ld_paths = cap(q{find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | grep -v '^#' | tr '\n' ' '});
 
 my @steps = (
@@ -134,7 +139,7 @@ my @steps = (
   "/run/current-system/sw/bin/systemctl is-system-running --wait || true",
 );
 
-open my $sh, '|-', 'sudo', 'bash' or die "sudo bash: $!\n";
+open my $sh, '|-', 'bash' or die "bash: $!\n";
 print $sh "set -euo pipefail\n";
 print $sh "$_\n" for @steps;
 close $sh or die "activation failed (exit $?)\n";
@@ -147,7 +152,7 @@ if ($status ne 'running') {
   system('systemctl', '--failed', '--no-pager');
   exit 1;
 }
-die "sudo broken\n" unless system('sudo', '-n', 'true') == 0;
+run('sudo', '-n', 'true');
 
 if ($ENV{GITHUB_PATH}) {
   open my $fh, '>>', $ENV{GITHUB_PATH} or die $!;
