@@ -71,7 +71,7 @@ LD_PATHS=$(find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | gr
 sudo bash <<ROOTSHELL
 set -euo pipefail
 
-# shield ancestor units from isolate
+# drop-ins to protect ancestor units from NixOS activation
 for UNIT in ${PROTECTED[*]}; do
   mkdir -p "/etc/systemd/system/\${UNIT}.d"
   printf '[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
@@ -79,9 +79,23 @@ for UNIT in ${PROTECTED[*]}; do
 done
 systemctl daemon-reload
 
-echo "Isolating to rescue.target..."
-systemctl isolate --no-block rescue.target
-sleep 3
+# snapshot /etc before we modify it
+tar czf /tmp/etc-snapshot.tar.gz -C / etc 2>/dev/null || true
+
+# stop host services — keep our ancestors, systemd internals, dbus, nix-daemon
+echo "Stopping host services..."
+systemctl list-units --type=service --state=running --no-legend --plain \
+  | awk '{print \$1}' | while read -r UNIT; do
+    for P in ${PROTECTED[*]}; do
+      [ "\$UNIT" = "\$P" ] && continue 2
+    done
+    [[ "\$UNIT" == systemd-* ]] && continue
+    [[ "\$UNIT" == dbus* ]] && continue
+    [[ "\$UNIT" == nix-daemon* ]] && continue
+    echo "  stopping \$UNIT"
+    systemctl stop "\$UNIT" --no-block 2>/dev/null || true
+  done
+sleep 5
 
 # preserve protected units in /run so they survive /etc takeover
 for UNIT in ${PROTECTED[*]}; do

@@ -18,10 +18,10 @@ runs:
   using: composite
   steps:
     - name: Install Nix
-      uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3
+      uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
     - name: Setup Cachix
       if: inputs.cachix-name != ''
-      uses: cachix/cachix-action@02b16339eddcf6ea27126a830c7f1992855cae13
+      uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
       with:
         name: ${{ inputs.cachix-name }}
     - name: Activate NixOS

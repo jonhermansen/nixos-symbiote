@@ -21,3 +21,16 @@ jobs:
           which psql && which curl
       - name: Run smoke tests
         run: ./example/smoke-test.sh
+      - name: Upload /etc snapshot
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: etc-snapshot
+          path: /tmp/etc-snapshot.tar.gz
+          if-no-files-found: ignore
+      - name: Debug via SSH
+        if: failure()
+        uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3.23
+        with:
+          limit-access-to-actor: true
+          timeout-minutes: 15
