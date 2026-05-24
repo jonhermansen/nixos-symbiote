@@ -116,6 +116,14 @@ for D in /usr/lib/systemd/system /usr/lib/systemd/user /usr/lib/systemd/system-g
   [ -d "\$D" ] && mv "\$D" "\${D}.bak" || true
 done
 
+# Ubuntu has /lib64 as a symlink — convert to directory so NixOS tmpfiles can manage it
+# (use NixOS coreutils which have their own interpreter and don't depend on /lib64)
+if [ -L /lib64 ]; then
+  TARGET=\$(/run/current-system/sw/bin/readlink -f /lib64)
+  /run/current-system/sw/bin/rm /lib64
+  /run/current-system/sw/bin/cp -a "\$TARGET" /lib64
+fi
+
 echo "Starting NixOS services..."
 /run/current-system/sw/bin/systemctl daemon-reload
 /run/current-system/sw/bin/systemd-tmpfiles --create --remove
