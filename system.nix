@@ -47,5 +47,7 @@ in
     programs.command-not-found.enable = lib.mkDefault false;
     environment.defaultPackages = lib.mkDefault [ ];
     fonts.fontconfig.enable = lib.mkDefault false;
+    # Keep the host's dynamic linker so non-NixOS binaries still work
+    environment.stub-ld.enable = lib.mkForce false;
   })
 ]).toplevel
