@@ -129,20 +129,20 @@ fi
 
 # debug: check unit file state before starting services
 echo "=== sample unit (nscd) ==="
-cat /etc/systemd/system/nscd.service 2>/dev/null || echo "not found"
+cat /etc/systemd/system/nscd.service || echo "not found"
 echo "=== systemd PID 1 ==="
-/run/current-system/sw/bin/readlink -f /proc/1/exe 2>/dev/null || true
+/run/current-system/sw/bin/readlink -f /proc/1/exe || true
 echo "=== host systemd ==="
-systemctl --version 2>/dev/null || true
+systemctl --version || true
 echo "=== NixOS systemd ==="
-/run/current-system/sw/bin/systemctl --version 2>/dev/null || true
+/run/current-system/sw/bin/systemctl --version || true
 echo "=== /bin/sh ==="
-ls -la /bin/sh 2>/dev/null || echo "/bin/sh missing"
+ls -la /bin/sh || echo "/bin/sh missing"
 echo "=== try exec nix binary ==="
 /run/current-system/sw/bin/true && echo "nix binary works" || echo "nix binary FAILS"
 echo "=== try exec from unit path ==="
-SAMPLE_EXEC=\$(grep '^ExecStart=' /etc/systemd/system/nscd.service 2>/dev/null | sed -n '1s/ExecStart=//p' | sed 's/^[!@+-]*//' | cut -d' ' -f1)
-[ -n "\$SAMPLE_EXEC" ] && ls -la "\$SAMPLE_EXEC" 2>&1 || echo "no exec path found"
+SAMPLE_EXEC=\$(grep '^ExecStart=' /etc/systemd/system/nscd.service | sed -n '1s/ExecStart=//p' | sed 's/^[!@+-]*//' | cut -d' ' -f1 || true)
+[ -n "\$SAMPLE_EXEC" ] && ls -la "\$SAMPLE_EXEC" || echo "no exec path found"
 echo "==="
 
 echo "Starting NixOS services..."
@@ -154,13 +154,13 @@ ldconfig
 
 STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
 echo "System: \$STATUS"
-/run/current-system/sw/bin/systemd-analyze blame --no-pager 2>/dev/null || true
-/run/current-system/sw/bin/systemd-analyze critical-chain --no-pager 2>/dev/null || true
+/run/current-system/sw/bin/systemd-analyze blame --no-pager || true
+/run/current-system/sw/bin/systemd-analyze critical-chain --no-pager || true
 if [ "\$STATUS" != "running" ]; then
   /run/current-system/sw/bin/systemctl --failed --no-pager
   /run/current-system/sw/bin/systemctl --failed --plain --no-legend --no-pager | while read -r UNIT _REST; do
     echo "=== \$UNIT ==="
-    /run/current-system/sw/bin/journalctl -u "\$UNIT" --no-pager --lines=15 2>/dev/null || true
+    /run/current-system/sw/bin/journalctl -u "\$UNIT" --no-pager --lines=15 || true
   done
   exit 1
 fi
