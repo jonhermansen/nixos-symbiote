@@ -202,6 +202,9 @@ sudo bash -c "
   echo 'Reloading systemd units...'
   /run/current-system/sw/bin/systemctl daemon-reload
 
+  # Remove Ubuntu's tmpfiles configs (they reference users NixOS removed)
+  mv /usr/lib/tmpfiles.d /usr/lib/tmpfiles.d.bak
+
   echo 'Creating tmpfiles...'
   /run/current-system/sw/bin/systemd-tmpfiles --create --remove
 
