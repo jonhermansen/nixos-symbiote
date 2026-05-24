@@ -199,11 +199,14 @@ sudo bash -c "
   echo 'Restoring host library paths...'
   ldconfig $HOST_LD_PATHS
 
+  # Remove Ubuntu's systemd units, generators, and tmpfiles before reload
+  echo 'Clearing host systemd artifacts...'
+  for d in /usr/lib/systemd/system /usr/lib/systemd/user /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators /usr/lib/tmpfiles.d /lib/systemd/system; do
+    if [ -d \$d ]; then mv \$d \${d}.bak; fi
+  done
+
   echo 'Reloading systemd units...'
   /run/current-system/sw/bin/systemctl daemon-reload
-
-  # Remove Ubuntu's tmpfiles configs (they reference users NixOS removed)
-  mv /usr/lib/tmpfiles.d /usr/lib/tmpfiles.d.bak
 
   echo 'Creating tmpfiles...'
   /run/current-system/sw/bin/systemd-tmpfiles --create --remove
