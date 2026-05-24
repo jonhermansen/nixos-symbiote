@@ -8,6 +8,10 @@ use File::Path qw(make_path rmtree);
 use File::Find;
 use Cwd 'abs_path';
 
+# ensure nix is on PATH regardless of how we were invoked
+$ENV{PATH} = join(':', grep { -d } '/nix/var/nix/profiles/default/bin', '/usr/local/bin',
+  '/usr/bin', '/bin', '/usr/sbin', '/sbin', split(':', $ENV{PATH} // ''));
+
 my $config = abs_path($ARGV[0] // die "Usage: $0 <configuration.nix> [nixpkgs-rev]\n");
 my $dir    = dirname(abs_path(__FILE__));
 
