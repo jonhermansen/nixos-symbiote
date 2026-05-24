@@ -148,6 +148,16 @@ if [ ${#STOP_LIST[@]} -gt 0 ]; then
   sudo systemctl stop "${STOP_LIST[@]}" || true
 fi
 
+# Kill everything that isn't in our process tree or PID 1
+echo "Killing remaining processes..."
+PROTECTED_SET=$(printf '%s\n' "${ANCESTOR_PIDS[@]}" 1 | sort -u)
+for pid in $(ps -eo pid= | tr -d ' '); do
+  if ! echo "$PROTECTED_SET" | grep -qx "$pid"; then
+    sudo kill -9 "$pid" 2>/dev/null || true
+  fi
+done
+echo "Survivors: $(ps -eo pid,comm --no-headers | wc -l) processes"
+
 # Preserve protected unit files in /run so they survive /etc takeover
 for UNIT in "${PROTECTED_UNITS[@]}"; do
   SRC="/etc/systemd/system/${UNIT}"
