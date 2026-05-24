@@ -22,6 +22,15 @@
     };
   };
 
+  services.zookeeper.enable = true;
+  services.apache-kafka = {
+    enable = true;
+    settings = {
+      "listeners" = [ "PLAINTEXT://localhost:9092" ];
+      "log.dirs" = [ "/var/lib/apache-kafka" ];
+    };
+  };
+
   virtualisation.docker.enable = true;
 
   services.k3s = {
@@ -32,6 +41,7 @@
   };
 
   environment.systemPackages = with pkgs; [
+    apacheKafka
     curl
     jq
     kubectl

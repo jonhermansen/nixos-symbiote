@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+#!/usr/bin/env nix-shell
+#! nix-shell -i bash -p jq
 set -euo pipefail
 
 CONFIG_PATH="$(realpath "$1")"
@@ -80,20 +81,20 @@ systemctl list-units --type=service --state=running --no-pager --no-legend
 
 echo ""
 echo "Service dependency graph (multi-user.target):"
-systemctl list-dependencies multi-user.target --no-pager 2>/dev/null || true
+systemctl list-dependencies multi-user.target --no-pager
 
 for UNIT in "${PROTECTED_UNITS[@]}"; do
   echo ""
   echo "Dependencies of $UNIT:"
-  systemctl list-dependencies "$UNIT" --no-pager 2>/dev/null || true
+  systemctl list-dependencies "$UNIT" --no-pager
   echo ""
   echo "Unit file for $UNIT:"
-  systemctl cat "$UNIT" 2>/dev/null || true
+  systemctl cat "$UNIT"
 done
 
 echo ""
 echo "Network targets:"
-systemctl list-dependencies network-online.target --no-pager 2>/dev/null || true
+systemctl list-dependencies network-online.target --no-pager
 endgroup
 
 # --- Build ---
@@ -144,7 +145,7 @@ done < <(systemctl list-units --type=service --state=running --no-pager --no-leg
 
 if [ ${#STOP_LIST[@]} -gt 0 ]; then
   echo "Stopping ${#STOP_LIST[@]} services: ${STOP_LIST[*]}"
-  sudo systemctl stop "${STOP_LIST[@]}" 2>/dev/null || true
+  sudo systemctl stop "${STOP_LIST[@]}" || true
 fi
 
 # Preserve protected unit files in /run so they survive /etc takeover
@@ -193,23 +194,17 @@ sudo bash -c "
   echo 'Running activate script...'
   $SYSTEM/activate
 
-  echo 'Activate done. Current user:'
-  id
-  echo 'sudoers:'
-  ls -la /etc/sudoers* 2>/dev/null || true
-  cat /etc/sudoers 2>/dev/null | head -20 || true
-
   echo 'Reloading systemd units...'
-  systemctl daemon-reload
+  /run/current-system/sw/bin/systemctl daemon-reload
 
   echo 'Creating tmpfiles...'
-  systemd-tmpfiles --create --remove 2>/dev/null || true
+  /run/current-system/sw/bin/systemd-tmpfiles --create --remove
 
   echo 'Starting multi-user.target...'
-  systemctl start multi-user.target
+  /run/current-system/sw/bin/systemctl start multi-user.target
 
   echo 'Waiting for services to stabilize...'
-  systemctl is-system-running --wait || true
+  /run/current-system/sw/bin/systemctl is-system-running --wait || true
 "
 endgroup
 

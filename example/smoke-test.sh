@@ -19,6 +19,12 @@ psql -U runner -d runner -c "INSERT INTO messages (body) VALUES ('hello from the
 result=$(psql -U runner -d runner -t -A -c "SELECT body FROM messages LIMIT 1;")
 [ "$result" = "hello from the pipeline" ] && pass "postgres round-trip" || fail "postgres returned: $result"
 
+echo "=== kafka ==="
+kafka-topics.sh --bootstrap-server localhost:9092 --create --topic test-topic --partitions 1 --replication-factor 1
+echo "hello from kafka" | kafka-console-producer.sh --bootstrap-server localhost:9092 --topic test-topic
+result=$(timeout 10 kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test-topic --from-beginning --max-messages 1)
+[ "$result" = "hello from kafka" ] && pass "kafka round-trip" || fail "kafka returned: $result"
+
 echo "=== docker ==="
 docker info >/dev/null 2>&1 && pass "docker daemon running" || fail "docker not available"
 
