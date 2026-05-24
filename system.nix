@@ -37,6 +37,9 @@ in
       commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];
     }];
 
+    networking.firewall.enable = lib.mkDefault false;
+    services.resolved.enable = lib.mkDefault false;
+    systemd.oomd.enable = lib.mkDefault false;
     documentation.enable = lib.mkDefault false;
     xdg.icons.enable = lib.mkDefault false;
     xdg.sounds.enable = lib.mkDefault false;

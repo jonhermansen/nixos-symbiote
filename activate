@@ -134,7 +134,10 @@ STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
 echo "System: \$STATUS"
 if [ "\$STATUS" != "running" ]; then
   /run/current-system/sw/bin/systemctl --failed --no-pager
-  /run/current-system/sw/bin/journalctl -b --no-pager -p err --lines=80
+  for UNIT in \$(/run/current-system/sw/bin/systemctl --failed --plain --no-legend --no-pager | awk '{print \$1}'); do
+    echo "=== \$UNIT ==="
+    /run/current-system/sw/bin/journalctl -u "\$UNIT" --no-pager --lines=15 2>/dev/null || true
+  done
   exit 1
 fi
 sudo -n true || exit 1
