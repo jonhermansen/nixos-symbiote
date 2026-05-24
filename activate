@@ -65,9 +65,11 @@ SYSTEM=$(nix-build "$SCRIPT_DIR/system.nix" \
 echo "Built: $SYSTEM"
 
 if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "/run/wrappers/bin" >> "$GITHUB_PATH"
   echo "$SYSTEM/sw/bin" >> "$GITHUB_PATH"
 fi
 
+NIX_ENV=$(which nix-env)
 NIXOS_SYSTEMD="$SYSTEM/systemd"
 
 # --- construct new root on disk ---
@@ -104,7 +106,7 @@ ln -sf "$NIXOS_SYSTEMD/lib/systemd/systemd-executor" "$NEW_ROOT/usr/lib/systemd/
 ln -sf "$NIXOS_SYSTEMD/lib/systemd/systemd" "$NEW_ROOT/sbin/init"
 
 # set up NixOS system profile and activate inside new root
-nix-env --profile /nix/var/nix/profiles/system --set $SYSTEM
+$NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
 ln -sfn /nix/var/nix/profiles/system "$NEW_ROOT/run/current-system"
 
 # activate NixOS — populates /etc, creates users, sets up unit symlinks
