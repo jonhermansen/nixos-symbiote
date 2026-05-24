@@ -183,7 +183,7 @@ endgroup
 # --- Activate ---
 group "Activating NixOS"
 NIX_ENV="$(which nix-env)"
-HOST_LD_PATHS=$(cat /etc/ld.so.conf.d/*.conf 2>/dev/null | grep -v '^#' || true)
+HOST_LD_PATHS=$(cat /etc/ld.so.conf.d/*.conf 2>/dev/null | grep -v '^#' | tr '\n' ' ' || true)
 sudo bash -c "
   set -euo pipefail
   echo 'Setting system profile...'
@@ -197,8 +197,7 @@ sudo bash -c "
 
   # Rebuild the dynamic linker cache so host binaries keep working
   echo 'Restoring host library paths...'
-  echo "$HOST_LD_PATHS" > /etc/ld.so.conf.d/host.conf
-  ldconfig
+  ldconfig $HOST_LD_PATHS
 
   echo 'Reloading systemd units...'
   /run/current-system/sw/bin/systemctl daemon-reload
