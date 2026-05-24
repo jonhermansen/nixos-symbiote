@@ -102,8 +102,8 @@ mkdir -p /etc.bak
 for D in /etc/systemd/system /etc/systemd/user /etc/systemd/system-generators /etc/dbus-1 /etc/fonts /etc/terminfo; do
   [ -d "\$D" ] && [ ! -L "\$D" ] && mv "\$D" "/etc.bak/\$(echo \$D | tr / _)" || true
 done
-[ -e /lib64 ] && mv /lib64 /lib64.bak || true
-# no daemon-reload here — /lib64 is gone so host systemctl can't execute
+# /lib64 left in place — environment.ldso creates a tmpfiles L+ rule that overwrites the dynamic linker
+systemctl daemon-reload
 
 echo "Activating NixOS..."
 $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
