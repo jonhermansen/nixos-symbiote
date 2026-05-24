@@ -134,6 +134,7 @@ STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
 echo "System: \$STATUS"
 if [ "\$STATUS" != "running" ]; then
   /run/current-system/sw/bin/systemctl --failed --no-pager
+  /run/current-system/sw/bin/journalctl -b --no-pager -p err --lines=80
   exit 1
 fi
 sudo -n true || exit 1
