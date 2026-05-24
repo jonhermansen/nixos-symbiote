@@ -132,23 +132,29 @@ echo "=== sample unit (nscd) ==="
 cat /etc/systemd/system/nscd.service || echo "not found"
 echo "=== systemd PID 1 ==="
 /run/current-system/sw/bin/readlink -f /proc/1/exe || true
-echo "=== host systemd ==="
-systemctl --version || true
-echo "=== NixOS systemd ==="
-/run/current-system/sw/bin/systemctl --version || true
+echo "=== host systemd-executor ==="
+ls -la /usr/lib/systemd/systemd-executor || echo "not found"
+ldd /usr/lib/systemd/systemd-executor || echo "ldd failed"
+echo "=== /etc/ld.so.conf ==="
+cat /etc/ld.so.conf || true
+echo "=== /etc/ld.so.conf.d/ ==="
+cat /etc/ld.so.conf.d/*.conf || true
 echo "=== /bin/sh ==="
 ls -la /bin/sh || echo "/bin/sh missing"
 echo "=== try exec nix binary ==="
 /run/current-system/sw/bin/true && echo "nix binary works" || echo "nix binary FAILS"
-echo "=== try exec from unit path ==="
-SAMPLE_EXEC=\$(grep '^ExecStart=' /etc/systemd/system/nscd.service | sed -n '1s/ExecStart=//p' | sed 's/^[!@+-]*//' | cut -d' ' -f1 || true)
-[ -n "\$SAMPLE_EXEC" ] && ls -la "\$SAMPLE_EXEC" || echo "no exec path found"
+echo "=== try exec host binary ==="
+/usr/lib/systemd/systemd-executor --version && echo "host executor works" || echo "host executor FAILS (exit \$?)"
 echo "==="
 
 echo "Starting NixOS services..."
 /run/current-system/sw/bin/systemctl daemon-reload
 /run/current-system/sw/bin/systemd-tmpfiles --create --remove
-ldconfig
+echo "=== ld.so.conf after tmpfiles ==="
+cat /etc/ld.so.conf || true
+ls /etc/ld.so.conf.d/ || true
+echo "==="
+ldconfig $LD_PATHS
 /run/current-system/sw/bin/systemctl start multi-user.target
 /run/current-system/sw/bin/systemctl is-system-running --wait || true
 
