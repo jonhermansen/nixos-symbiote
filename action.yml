@@ -26,9 +26,15 @@ runs:
         name: ${{ inputs.cachix-name }}
     - name: Activate NixOS
       shell: bash
-      # ./activate has a nix-shell shebang for standalone use;
-      # here we call with bash since nixpkgs isn't on NIX_PATH
+      continue-on-error: true
       run: |-
         bash "${{ github.action_path }}/activate" \
           "${{ inputs.configuration }}" \
           "${{ inputs.nixpkgs }}"
+    - name: Wait for NixOS
+      shell: bash
+      run: |-
+        timeout 120 systemctl is-system-running --wait || true
+        sudo ln -sfn /nix/var/nix/profiles/system /run/current-system
+        echo "System state: $(systemctl is-system-running 2>&1 || true)"
+        systemctl --failed || true

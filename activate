@@ -21,7 +21,7 @@ command -v nix-build >/dev/null || { echo "Requires Nix."; exit 1; }
 sudo -n true 2>/dev/null        || { echo "Requires passwordless sudo."; exit 1; }
 
 if [ -z "${CI:-}" ]; then
-  read -rp "This will activate NixOS on top of your running system. Are you sure? [y/N] " confirm
+  read -rp "This will soft-reboot into NixOS. Are you sure? [y/N] " confirm
   [[ "$confirm" == [yY] ]] || exit 1
 fi
 
@@ -34,7 +34,7 @@ DNS=$(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers:[[:space:]]*//p' |
 
 echo "root=$ROOT_DEV ($ROOT_FSTYPE) user=$(whoami) uid=$(id -u)"
 
-# walk ancestor chain to find systemd units that must survive isolate
+# walk ancestor chain to find systemd units that must survive soft-reboot
 readarray -t PROTECTED < <(perl -e '
   my %u; my $pid = getppid();
   while ($pid > 1) {
@@ -46,7 +46,7 @@ readarray -t PROTECTED < <(perl -e '
   }
   print "$_\n" for sort keys %u;
 ')
-[ ${#PROTECTED[@]} -gt 0 ] || { echo "No ancestor units found — isolate would kill us."; exit 1; }
+[ ${#PROTECTED[@]} -gt 0 ] || { echo "No ancestor units found."; exit 1; }
 echo "Protected: ${PROTECTED[*]}"
 
 # build
@@ -62,118 +62,74 @@ SYSTEM=$(nix-build "$SCRIPT_DIR/system.nix" \
   --argstr userHome    "$HOME" \
   --argstr userUid     "$(id -u)" \
   --no-out-link)
-echo "Built: $SYSTEM ($(nix path-info -rSh "$SYSTEM" 2>/dev/null | tail -1))"
+echo "Built: $SYSTEM"
 
-NIX_ENV=$(which nix-env)
-LD_PATHS=$(find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | grep -v '^#' | tr '\n' ' ' || true)
-HOST_LINKER=$(readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null || true)
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "$SYSTEM/sw/bin" >> "$GITHUB_PATH"
+fi
 
-# everything below needs root — one sudo bash to avoid exec-after-nix-build issues
+NIXOS_SYSTEMD="$SYSTEM/systemd"
+
+# --- construct new root on disk ---
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+NEW_ROOT="/nixos-roots/$TIMESTAMP"
+
 sudo bash <<ROOTSHELL
 set -euo pipefail
 
-# protect ancestor units and nix-daemon from isolate and NixOS activation
+mkdir -p $NEW_ROOT
+
+# base directory structure
+for d in etc var var/lib var/log tmp root \
+         usr/lib/systemd bin sbin nix \
+         run dev proc sys home; do
+  mkdir -p "$NEW_ROOT/\$d"
+done
+
+# bind-mount /nix so the store is available in new root
+mount --bind /nix "$NEW_ROOT/nix"
+
+# /home: pass through so agent and user data survive
+mount --bind /home "$NEW_ROOT/home"
+
+# mount kernel filesystems for chroot activation
+mount --bind /dev "$NEW_ROOT/dev"
+mount --bind /proc "$NEW_ROOT/proc"
+mount --bind /sys "$NEW_ROOT/sys"
+mount --bind /run "$NEW_ROOT/run"
+
+# PID 1 re-execs from /usr/lib/systemd/systemd after pivot_root
+ln -sf "$NIXOS_SYSTEMD/lib/systemd/systemd" "$NEW_ROOT/usr/lib/systemd/systemd"
+ln -sf "$NIXOS_SYSTEMD/lib/systemd/systemd-executor" "$NEW_ROOT/usr/lib/systemd/systemd-executor"
+ln -sf "$NIXOS_SYSTEMD/lib/systemd/systemd" "$NEW_ROOT/sbin/init"
+
+# set up NixOS system profile and activate inside new root
+nix-env --profile /nix/var/nix/profiles/system --set $SYSTEM
+ln -sfn /nix/var/nix/profiles/system "$NEW_ROOT/run/current-system"
+
+# activate NixOS — populates /etc, creates users, sets up unit symlinks
+NIXOS_ACTION=switch NIXOS_INSTALL_BOOTLOADER=0 \
+  chroot "$NEW_ROOT" /nix/var/nix/profiles/system/activate 2>&1 || true
+
+# unmount kernel filesystems from chroot (systemd will re-mount after pivot)
+umount "$NEW_ROOT/run"
+umount "$NEW_ROOT/sys"
+umount "$NEW_ROOT/proc"
+umount "$NEW_ROOT/dev"
+
+# protect ancestor units: survive the soft-reboot kill phase
 for UNIT in ${PROTECTED[*]} nix-daemon.service; do
-  mkdir -p "/etc/systemd/system/\${UNIT}.d"
-  printf '[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
-    > "/etc/systemd/system/\${UNIT}.d/protect.conf"
+  mkdir -p "/run/systemd/system/\${UNIT}.d"
+  printf '[Unit]\nIgnoreOnIsolate=yes\nSurviveFinalKillSignal=yes\n' \
+    > "/run/systemd/system/\${UNIT}.d/survive.conf"
 done
 systemctl daemon-reload
 
-# snapshot /etc before we modify it
-tar czf /tmp/etc-snapshot.tar.gz -C / etc 2>/dev/null || true
+# make new root a mount point (pivot_root requires this)
+mount --bind "$NEW_ROOT" "$NEW_ROOT"
 
-# rescue.service runs sulogin, which blocks waiting for a TTY that doesn't exist on headless systems
-mkdir -p /etc/systemd/system/rescue.service.d
-printf '[Service]\nExecStart=\nExecStart=/bin/true\n' \
-  > /etc/systemd/system/rescue.service.d/no-sulogin.conf
-systemctl daemon-reload
-
-echo "Isolating to rescue.target..."
-systemctl isolate rescue.target
-
-# preserve protected units in /run so they survive /etc takeover
-for UNIT in ${PROTECTED[*]}; do
-  [ -f "/etc/systemd/system/\$UNIT" ] && cp "/etc/systemd/system/\$UNIT" "/run/systemd/system/\$UNIT" || true
-  [ -d "/etc/systemd/system/\${UNIT}.d" ] && mkdir -p "/run/systemd/system/\${UNIT}.d" && cp -a "/etc/systemd/system/\${UNIT}.d/." "/run/systemd/system/\${UNIT}.d/" || true
-done
-
-# clear host paths that conflict with NixOS
-mkdir -p /etc.bak
-for D in /etc/systemd/system /etc/systemd/user /etc/systemd/system-generators /etc/dbus-1 /etc/fonts /etc/terminfo; do
-  [ -d "\$D" ] && [ ! -L "\$D" ] && mv "\$D" "/etc.bak/\$(echo \$D | tr / _)" || true
-done
-# /lib64 left in place — environment.ldso creates a tmpfiles L+ rule that overwrites the dynamic linker
-systemctl daemon-reload
-
-echo "Activating NixOS..."
-$NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
-ln -sfn /nix/var/nix/profiles/system /run/current-system
-$SYSTEM/activate
-
-# persist host library paths so they survive NixOS ldconfig runs
-echo "$LD_PATHS" | tr ' ' '\n' | grep -v '^\$' > /etc/ld.so.conf.d/host-libs.conf 2>/dev/null || true
-ldconfig
-
-# clear host systemd artifacts
-for D in /usr/lib/systemd/system /usr/lib/systemd/user /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators /usr/lib/tmpfiles.d /lib/systemd/system; do
-  [ -d "\$D" ] && mv "\$D" "\${D}.bak" || true
-done
-
-# debug: check unit file state before starting services
-echo "=== sample unit (nscd) ==="
-cat /etc/systemd/system/nscd.service || echo "not found"
-echo "=== systemd PID 1 ==="
-/run/current-system/sw/bin/readlink -f /proc/1/exe || true
-echo "=== host systemd-executor ==="
-ls -la /usr/lib/systemd/systemd-executor || echo "not found"
-ldd /usr/lib/systemd/systemd-executor || echo "ldd failed"
-echo "=== /etc/ld.so.conf ==="
-cat /etc/ld.so.conf || true
-echo "=== /etc/ld.so.conf.d/ ==="
-cat /etc/ld.so.conf.d/*.conf || true
-echo "=== /bin/sh ==="
-ls -la /bin/sh || echo "/bin/sh missing"
-echo "=== try exec nix binary ==="
-/run/current-system/sw/bin/true && echo "nix binary works" || echo "nix binary FAILS"
-echo "=== try exec host binary ==="
-/usr/lib/systemd/systemd-executor --version && echo "host executor works" || echo "host executor FAILS (exit \$?)"
-echo "==="
-
-echo "Starting NixOS services..."
-/run/current-system/sw/bin/systemctl daemon-reload
-echo "=== /lib64 before tmpfiles ==="
-/run/current-system/sw/bin/ls -la /lib64/ || true
-echo "==="
-/run/current-system/sw/bin/systemd-tmpfiles --create --remove
-echo "=== /lib64 after tmpfiles ==="
-/run/current-system/sw/bin/ls -la /lib64/ || true
-echo "==="
-if [ -n "$HOST_LINKER" ] && [ -f "$HOST_LINKER" ]; then
-  /run/current-system/sw/bin/mkdir -p /lib64
-  /run/current-system/sw/bin/ln -sf "$HOST_LINKER" /lib64/ld-linux-x86-64.so.2
-  echo "Restored host linker: /lib64/ld-linux-x86-64.so.2 -> $HOST_LINKER"
-fi
-ldconfig $LD_PATHS
-/run/current-system/sw/bin/systemctl start multi-user.target
-/run/current-system/sw/bin/systemctl is-system-running --wait || true
-
-STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
-echo "System: \$STATUS"
-/run/current-system/sw/bin/systemd-analyze blame --no-pager || true
-/run/current-system/sw/bin/systemd-analyze critical-chain --no-pager || true
-if [ "\$STATUS" != "running" ]; then
-  /run/current-system/sw/bin/systemctl --failed --no-pager
-  /run/current-system/sw/bin/systemctl --failed --plain --no-legend --no-pager | while read -r UNIT _REST; do
-    echo "=== \$UNIT ==="
-    /run/current-system/sw/bin/journalctl -u "\$UNIT" --no-pager --lines=15 || true
-  done
-  exit 1
-fi
-sudo -n true || exit 1
+# point systemd at the new root and trigger soft-reboot
+ln -sfn "$NEW_ROOT" /run/nextroot
+echo "New root ready at $NEW_ROOT — triggering soft-reboot..."
+systemctl soft-reboot
 ROOTSHELL
-
-if [ -n "${GITHUB_PATH:-}" ]; then
-  echo "/run/wrappers/bin" >> "$GITHUB_PATH"
-  echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
-fi

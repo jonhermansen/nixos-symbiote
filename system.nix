@@ -49,6 +49,5 @@ in
     programs.command-not-found.enable = lib.mkDefault false;
     environment.defaultPackages = lib.mkDefault [ ];
     fonts.fontconfig.enable = lib.mkDefault false;
-    environment.ldso = lib.mkForce null;
   })
 ]).toplevel
