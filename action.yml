@@ -34,6 +34,10 @@ runs:
     - name: Wait for NixOS
       shell: bash
       run: |-
-        timeout 120 systemctl is-system-running --wait || true
-        echo "System state: $(timeout 10 systemctl is-system-running 2>&1 || true)"
+        for i in $(seq 1 60); do
+          state=$(timeout 5 systemctl is-system-running 2>/dev/null || true)
+          echo "System state: $state"
+          [ "$state" = "running" ] || [ "$state" = "degraded" ] && break
+          sleep 2
+        done
         timeout 10 systemctl --failed || true
