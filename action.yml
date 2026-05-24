@@ -27,6 +27,6 @@ runs:
     - name: Activate NixOS
       shell: bash
       run: |-
-        bash "${{ github.action_path }}/activate.sh" \
+        "${{ github.action_path }}/activate" \
           "${{ inputs.configuration }}" \
           "${{ inputs.nixpkgs }}"
