@@ -117,45 +117,18 @@ endgroup
 
 # --- Protect ancestor processes, stop everything else ---
 group "Preparing system"
-# Mark protected units so switch-to-configuration won't stop them
+# Shield protected units from isolation
 for UNIT in "${PROTECTED_UNITS[@]}"; do
   echo "Shielding $UNIT"
   sudo mkdir -p "/etc/systemd/system/${UNIT}.d"
-  printf '[Unit]\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
+  printf '[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
     | sudo tee "/etc/systemd/system/${UNIT}.d/protect.conf" >/dev/null
 done
 sudo systemctl daemon-reload
 
-# Stop all non-essential services
-STOP_LIST=()
-while IFS= read -r UNIT; do
-  UNIT=$(echo "$UNIT" | awk '{print $1}')
-  DOMINATED=false
-  for P in "${PROTECTED_UNITS[@]}"; do
-    if [ "$UNIT" = "$P" ]; then DOMINATED=true; break; fi
-  done
-  # Keep systemd-critical services
-  case "$UNIT" in
-    systemd-*|dbus*|nix-daemon*) DOMINATED=true ;;
-  esac
-  if ! $DOMINATED; then
-    STOP_LIST+=("$UNIT")
-  fi
-done < <(systemctl list-units --type=service --state=running --no-pager --no-legend)
-
-if [ ${#STOP_LIST[@]} -gt 0 ]; then
-  echo "Stopping ${#STOP_LIST[@]} services: ${STOP_LIST[*]}"
-  sudo systemctl stop "${STOP_LIST[@]}" || true
-fi
-
-# Kill everything that isn't in our process tree or PID 1
-echo "Killing remaining processes..."
-PROTECTED_SET=$(printf '%s\n' "${ANCESTOR_PIDS[@]}" 1 | sort -u)
-for pid in $(ps -eo pid= | tr -d ' '); do
-  if ! echo "$PROTECTED_SET" | grep -qx "$pid"; then
-    sudo kill -9 "$pid" 2>/dev/null || true
-  fi
-done
+# Shut down all services in reverse dependency order
+echo "Isolating to rescue.target..."
+sudo systemctl isolate rescue.target
 echo "Survivors: $(ps -eo pid,comm --no-headers | wc -l) processes"
 
 # Preserve protected unit files in /run so they survive /etc takeover
