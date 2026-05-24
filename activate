@@ -128,19 +128,20 @@ if [ -L /lib64 ]; then
 fi
 
 # debug: check unit file state before starting services
-echo "=== /etc/systemd/system ==="
-ls -la /etc/systemd/system/ 2>&1 | head -20
 echo "=== sample unit (nscd) ==="
 cat /etc/systemd/system/nscd.service 2>/dev/null || echo "not found"
-echo "=== systemd version ==="
-systemctl --version 2>/dev/null | head -1
-/run/current-system/sw/bin/systemctl --version 2>/dev/null | head -1
+echo "=== systemd PID 1 ==="
+/run/current-system/sw/bin/readlink -f /proc/1/exe 2>/dev/null || true
+echo "=== host systemd ==="
+systemctl --version 2>/dev/null || true
+echo "=== NixOS systemd ==="
+/run/current-system/sw/bin/systemctl --version 2>/dev/null || true
 echo "=== /bin/sh ==="
 ls -la /bin/sh 2>/dev/null || echo "/bin/sh missing"
 echo "=== try exec nix binary ==="
 /run/current-system/sw/bin/true && echo "nix binary works" || echo "nix binary FAILS"
 echo "=== try exec from unit path ==="
-SAMPLE_EXEC=\$(grep '^ExecStart=' /etc/systemd/system/nscd.service 2>/dev/null | head -1 | sed 's/ExecStart=//;s/^[!@+-]*//' | cut -d' ' -f1)
+SAMPLE_EXEC=\$(grep '^ExecStart=' /etc/systemd/system/nscd.service 2>/dev/null | sed -n '1s/ExecStart=//p' | sed 's/^[!@+-]*//' | cut -d' ' -f1)
 [ -n "\$SAMPLE_EXEC" ] && ls -la "\$SAMPLE_EXEC" 2>&1 || echo "no exec path found"
 echo "==="
 
@@ -153,6 +154,8 @@ ldconfig
 
 STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
 echo "System: \$STATUS"
+/run/current-system/sw/bin/systemd-analyze blame --no-pager 2>/dev/null || true
+/run/current-system/sw/bin/systemd-analyze critical-chain --no-pager 2>/dev/null || true
 if [ "\$STATUS" != "running" ]; then
   /run/current-system/sw/bin/systemctl --failed --no-pager
   /run/current-system/sw/bin/systemctl --failed --plain --no-legend --no-pager | while read -r UNIT _REST; do
