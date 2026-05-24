@@ -71,8 +71,8 @@ LD_PATHS=$(find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | gr
 sudo bash <<ROOTSHELL
 set -euo pipefail
 
-# drop-ins to protect ancestor units from NixOS activation
-for UNIT in ${PROTECTED[*]}; do
+# protect ancestor units and nix-daemon from isolate and NixOS activation
+for UNIT in ${PROTECTED[*]} nix-daemon.service; do
   mkdir -p "/etc/systemd/system/\${UNIT}.d"
   printf '[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
     > "/etc/systemd/system/\${UNIT}.d/protect.conf"
@@ -82,20 +82,11 @@ systemctl daemon-reload
 # snapshot /etc before we modify it
 tar czf /tmp/etc-snapshot.tar.gz -C / etc 2>/dev/null || true
 
-# stop host services — keep our ancestors, systemd internals, dbus, nix-daemon
-echo "Stopping host services..."
-systemctl list-units --type=service --state=running --no-legend --plain \
-  | awk '{print \$1}' | while read -r UNIT; do
-    for P in ${PROTECTED[*]}; do
-      [ "\$UNIT" = "\$P" ] && continue 2
-    done
-    [[ "\$UNIT" == systemd-* ]] && continue
-    [[ "\$UNIT" == dbus* ]] && continue
-    [[ "\$UNIT" == nix-daemon* ]] && continue
-    echo "  stopping \$UNIT"
-    systemctl stop "\$UNIT" --no-block 2>/dev/null || true
-  done
-sleep 5
+# rescue.service runs sulogin, which blocks waiting for a TTY that doesn't exist on headless systems
+systemctl mask rescue.service
+
+echo "Isolating to rescue.target..."
+systemctl isolate rescue.target
 
 # preserve protected units in /run so they survive /etc takeover
 for UNIT in ${PROTECTED[*]}; do
@@ -109,7 +100,7 @@ for D in /etc/systemd/system /etc/systemd/user /etc/systemd/system-generators /e
   [ -d "\$D" ] && [ ! -L "\$D" ] && mv "\$D" "/etc.bak/\$(echo \$D | tr / _)" || true
 done
 [ -e /lib64 ] && mv /lib64 /lib64.bak || true
-systemctl daemon-reload
+# no daemon-reload here — /lib64 is gone so host systemctl can't execute
 
 echo "Activating NixOS..."
 $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
