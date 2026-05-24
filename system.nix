@@ -29,8 +29,8 @@ in
       inherit uid;
       extraGroups = [ "wheel" ];
     };
-    users.mutableUsers = lib.mkForce false;
-    users.allowNoPasswordLogin = lib.mkForce true;
+    # Preserve host users/groups — don't remove or remap existing UIDs/GIDs
+    users.mutableUsers = lib.mkForce true;
     security.sudo.wheelNeedsPassword = lib.mkForce false;
     security.sudo.extraRules = lib.mkForce [{
       users = [ username ];
