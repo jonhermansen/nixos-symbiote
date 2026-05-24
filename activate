@@ -1,5 +1,4 @@
-#!/usr/bin/env nix-shell
-#! nix-shell -i perl -p perl
+#!/usr/bin/env perl
 use strict;
 use warnings;
 use JSON::PP;

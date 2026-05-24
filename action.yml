@@ -26,9 +26,7 @@ runs:
         name: ${{ inputs.cachix-name }}
     - name: Activate NixOS
       shell: bash
-      # ./activate has a nix-shell shebang for standalone use;
-      # here we bootstrap with the host perl instead
       run: |-
-        perl "${{ github.action_path }}/activate" \
+        "${{ github.action_path }}/activate" \
           "${{ inputs.configuration }}" \
           "${{ inputs.nixpkgs }}"
