@@ -122,10 +122,20 @@ umount -l "$NEW_ROOT/dev"
 # protect ancestor units: survive the soft-reboot kill phase
 for UNIT in ${PROTECTED[*]} nix-daemon.service; do
   mkdir -p "/run/systemd/system/\${UNIT}.d"
-  printf '[Unit]\nIgnoreOnIsolate=yes\nSurviveFinalKillSignal=yes\n' \
-    > "/run/systemd/system/\${UNIT}.d/survive.conf"
+  cat > "/run/systemd/system/\${UNIT}.d/survive.conf" <<UNITCONF
+[Unit]
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+SurviveFinalKillSignal=yes
+UNITCONF
 done
 systemctl daemon-reload
+
+# verify protections applied
+for UNIT in ${PROTECTED[*]}; do
+  echo "--- \$UNIT ---"
+  systemctl show "\$UNIT" -p SurviveFinalKillSignal,IgnoreOnIsolate,DefaultDependencies
+done
 
 # make new root a mount point (pivot_root requires this)
 mount --bind "$NEW_ROOT" "$NEW_ROOT"
