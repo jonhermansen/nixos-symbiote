@@ -98,7 +98,7 @@ mount --bind /home "$NEW_ROOT/home"
 mount --bind /dev "$NEW_ROOT/dev"
 mount --bind /proc "$NEW_ROOT/proc"
 mount --bind /sys "$NEW_ROOT/sys"
-mount --bind /run "$NEW_ROOT/run"
+mount -t tmpfs tmpfs "$NEW_ROOT/run"
 
 # PID 1 re-execs from /usr/lib/systemd/systemd after pivot_root
 ln -sf "$NIXOS_SYSTEMD/lib/systemd/systemd" "$NEW_ROOT/usr/lib/systemd/systemd"
@@ -110,10 +110,10 @@ $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
 ln -sfn /nix/var/nix/profiles/system "$NEW_ROOT/run/current-system"
 
 # activate NixOS — populates /etc, creates users, sets up unit symlinks
-NIXOS_ACTION=switch NIXOS_INSTALL_BOOTLOADER=0 \
+NIXOS_ACTION=boot NIXOS_INSTALL_BOOTLOADER=0 \
   chroot "$NEW_ROOT" /nix/var/nix/profiles/system/activate 2>&1 || true
 
-# unmount kernel filesystems from chroot (systemd will re-mount after pivot)
+# unmount chroot filesystems (systemd will re-mount after pivot)
 umount "$NEW_ROOT/run"
 umount "$NEW_ROOT/sys"
 umount "$NEW_ROOT/proc"
