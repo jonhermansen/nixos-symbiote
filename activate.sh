@@ -227,13 +227,9 @@ if [ "$STATUS" = "degraded" ]; then
 fi
 
 echo "Verifying sudo..."
-if sudo -n true 2>/dev/null; then
-  echo "sudo: ok"
-else
-  warn "sudo not working (PAM config may need NixOS sudo binary)"
-  echo "Groups: $(id)"
-  echo "sudoers: $(cat /etc/sudoers 2>/dev/null | grep -v '^#' | grep -v '^$' || true)"
-fi
+echo "Wrappers: $(ls -la /run/wrappers/bin/sudo 2>&1)"
+echo "Mount: $(mount | grep wrappers)"
+sudo -n true 2>&1 && echo "sudo: ok" || warn "sudo not working"
 endgroup
 
 if [ -n "${GITHUB_PATH:-}" ]; then
