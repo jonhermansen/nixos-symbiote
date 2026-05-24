@@ -8,7 +8,10 @@ use Cwd 'abs_path';
 
 sub run  { system(@_) == 0 or die "failed: @_\n" }
 sub cap  { chomp(my $o = `$_[0]`); $o }
-sub sudo { run('sudo', @_) }
+
+# resolve sudo once — execvp can't always find it after nix-build
+my $SUDO = cap('which sudo') || '/usr/bin/sudo';
+sub sudo { run($SUDO, @_) }
 
 my $config = abs_path($ARGV[0] // die "Usage: $0 <configuration.nix> [nixpkgs-rev]\n");
 my $dir    = dirname(abs_path(__FILE__));
