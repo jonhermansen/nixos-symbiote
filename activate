@@ -114,10 +114,10 @@ NIXOS_ACTION=boot NIXOS_INSTALL_BOOTLOADER=0 \
   chroot "$NEW_ROOT" /nix/var/nix/profiles/system/activate 2>&1 || true
 
 # unmount chroot filesystems (systemd will re-mount after pivot)
-umount "$NEW_ROOT/run"
-umount "$NEW_ROOT/sys"
-umount "$NEW_ROOT/proc"
-umount "$NEW_ROOT/dev"
+umount -l "$NEW_ROOT/run"
+umount -l "$NEW_ROOT/sys"
+umount -l "$NEW_ROOT/proc"
+umount -l "$NEW_ROOT/dev"
 
 # protect ancestor units: survive the soft-reboot kill phase
 for UNIT in ${PROTECTED[*]} nix-daemon.service; do
