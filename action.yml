@@ -35,6 +35,5 @@ runs:
       shell: bash
       run: |-
         timeout 120 systemctl is-system-running --wait || true
-        sudo ln -sfn /nix/var/nix/profiles/system /run/current-system
         echo "System state: $(systemctl is-system-running 2>&1 || true)"
         systemctl --failed || true
