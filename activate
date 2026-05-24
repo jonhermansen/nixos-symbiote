@@ -109,7 +109,10 @@ echo "Activating NixOS..."
 $NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
 ln -sfn /nix/var/nix/profiles/system /run/current-system
 $SYSTEM/activate
-ldconfig $LD_PATHS
+
+# persist host library paths so they survive NixOS ldconfig runs
+echo "$LD_PATHS" | tr ' ' '\n' | grep -v '^\$' > /etc/ld.so.conf.d/host-libs.conf 2>/dev/null || true
+ldconfig
 
 # clear host systemd artifacts
 for D in /usr/lib/systemd/system /usr/lib/systemd/user /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators /usr/lib/tmpfiles.d /lib/systemd/system; do
@@ -127,6 +130,7 @@ fi
 echo "Starting NixOS services..."
 /run/current-system/sw/bin/systemctl daemon-reload
 /run/current-system/sw/bin/systemd-tmpfiles --create --remove
+ldconfig
 /run/current-system/sw/bin/systemctl start multi-user.target
 /run/current-system/sw/bin/systemctl is-system-running --wait || true
 
@@ -134,7 +138,7 @@ STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
 echo "System: \$STATUS"
 if [ "\$STATUS" != "running" ]; then
   /run/current-system/sw/bin/systemctl --failed --no-pager
-  for UNIT in \$(/run/current-system/sw/bin/systemctl --failed --plain --no-legend --no-pager | awk '{print \$1}'); do
+  /run/current-system/sw/bin/systemctl --failed --plain --no-legend --no-pager | while read -r UNIT _REST; do
     echo "=== \$UNIT ==="
     /run/current-system/sw/bin/journalctl -u "\$UNIT" --no-pager --lines=15 2>/dev/null || true
   done
