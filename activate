@@ -8,9 +8,13 @@ use File::Path qw(make_path rmtree);
 use File::Find;
 use Cwd 'abs_path';
 
-# ensure nix is on PATH regardless of how we were invoked
-$ENV{PATH} = join(':', grep { -d } '/nix/var/nix/profiles/default/bin', '/usr/local/bin',
-  '/usr/bin', '/bin', '/usr/sbin', '/sbin', split(':', $ENV{PATH} // ''));
+# ensure nix and system tools are on PATH regardless of how we were invoked
+for my $p (qw(/nix/var/nix/profiles/default/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin)) {
+  $ENV{PATH} = "$p:$ENV{PATH}" if -d $p && $ENV{PATH} !~ /(^|:)\Q$p\E(:|$)/;
+}
+
+sub run { system(@_) == 0 or die "failed: @_\n" }
+sub cap { chomp(my $o = `$_[0]`); $o }
 
 my $config = abs_path($ARGV[0] // die "Usage: $0 <configuration.nix> [nixpkgs-rev]\n");
 my $dir    = dirname(abs_path(__FILE__));
@@ -21,9 +25,6 @@ if ($nixpkgs eq '' && -f "$dir/flake.lock") {
   $nixpkgs = $lock->{nodes}{nixpkgs}{locked}{rev};
 }
 $nixpkgs ||= 'nixos-unstable';
-
-sub run { system(@_) == 0 or die "failed: @_\n" }
-sub cap { chomp(my $o = `$_[0]`); $o }
 
 # preflight
 die "Requires Linux\n"    unless $^O eq 'linux';
@@ -37,13 +38,13 @@ if (!$ENV{CI}) {
   exit 1 unless $c =~ /^[yY]$/;
 }
 
-# re-exec as root, forwarding relevant env vars
+# re-exec as root, forwarding relevant env vars via env(1)
 if ($> != 0) {
   die "Requires passwordless sudo\n" unless system('sudo -n true 2>/dev/null') == 0;
   my @env = map { "$_=$ENV{$_}" } grep { defined $ENV{$_} }
     qw(PATH HOME CI GITHUB_PATH GITHUB_ACTIONS NIX_PROFILES NIX_SSL_CERT_FILE);
   push @env, "SUDO_UID=$<", "SUDO_HOME=$ENV{HOME}";
-  exec('sudo', @env, $^X, $0, @ARGV) or die "exec sudo: $!\n";
+  exec('sudo', 'env', @env, $^X, $0, @ARGV) or die "exec sudo: $!\n";
 }
 
 # detect system
