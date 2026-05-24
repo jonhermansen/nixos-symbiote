@@ -1,140 +1,127 @@
-#!/usr/bin/env perl
-use strict;
-use warnings;
-use JSON::PP;
-use File::Basename;
-use Cwd 'abs_path';
+#!/usr/bin/env nix-shell
+#! nix-shell -i bash -p perl
+set -euo pipefail
 
-sub cap { chomp(my $o = `$_[0]`); $o }
+CONFIG_PATH="$(realpath "$1")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-my $config = abs_path($ARGV[0] // die "Usage: $0 <configuration.nix> [nixpkgs-rev]\n");
-my $dir    = dirname(abs_path(__FILE__));
+NIXPKGS="${2:-}"
+if [ -z "$NIXPKGS" ] && [ -f "$SCRIPT_DIR/flake.lock" ]; then
+  NIXPKGS=$(nix-instantiate --eval -E \
+    "(builtins.fromJSON (builtins.readFile $SCRIPT_DIR/flake.lock)).nodes.nixpkgs.locked.rev" \
+    | tr -d '"')
+fi
+: "${NIXPKGS:=nixos-unstable}"
 
-my $nixpkgs = $ARGV[1] // '';
-if ($nixpkgs eq '' && -f "$dir/flake.lock") {
-  my $lock = decode_json(do { local $/; open my $f, '<', "$dir/flake.lock" or die $!; <$f> });
-  $nixpkgs = $lock->{nodes}{nixpkgs}{locked}{rev};
-}
-$nixpkgs ||= 'nixos-unstable';
+# preflight
+[ "$(uname -s)" = "Linux" ]    || { echo "Requires Linux."; exit 1; }
+[ -d /run/systemd/system ]     || { echo "Requires systemd."; exit 1; }
+[ ! -f /etc/NIXOS ]            || { echo "Already NixOS."; exit 1; }
+command -v nix-build >/dev/null || { echo "Requires Nix."; exit 1; }
+sudo -n true 2>/dev/null        || { echo "Requires passwordless sudo."; exit 1; }
 
-die "Requires Linux\n"    unless $^O eq 'linux';
-die "Requires systemd\n"  unless -d '/run/systemd/system';
-die "Already NixOS\n"     if -f '/etc/NIXOS';
-die "Requires Nix\n"      unless cap('which nix-build 2>/dev/null');
-die "Requires passwordless sudo\n" unless system('sudo -n true 2>/dev/null') == 0;
+if [ -z "${CI:-}" ]; then
+  read -rp "This will activate NixOS on top of your running system. Are you sure? [y/N] " confirm
+  [[ "$confirm" == [yY] ]] || exit 1
+fi
 
-if (!$ENV{CI}) {
-  print "This will activate NixOS on top of your running system.\nAre you sure? [y/N] ";
-  chomp(my $c = <STDIN>);
-  exit 1 unless $c =~ /^[yY]$/;
-}
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+ROOT_FSTYPE=$(findmnt -n -o FSTYPE /)
+NIX_DEV=$(findmnt -n -o SOURCE /nix 2>/dev/null || true)
+NIX_FSTYPE=$(findmnt -n -o FSTYPE /nix 2>/dev/null || true)
+DNS=$(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers:[[:space:]]*//p' | head -1)
+: "${DNS:=1.1.1.1}"
 
-my $root_dev = cap('findmnt -n -o SOURCE /');
-my $root_fs  = cap('findmnt -n -o FSTYPE /');
-my $nix_dev  = cap('findmnt -n -o SOURCE /nix 2>/dev/null') // '';
-my $nix_fs   = cap('findmnt -n -o FSTYPE /nix 2>/dev/null') // '';
-my $dns      = cap(q{resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers:[[:space:]]*//p' | head -1}) || '1.1.1.1';
-
-print "root=$root_dev ($root_fs) user=", scalar cap('whoami'), " uid=", scalar cap('id -u'), "\n";
+echo "root=$ROOT_DEV ($ROOT_FSTYPE) user=$(whoami) uid=$(id -u)"
 
 # walk ancestor chain to find systemd units that must survive isolate
-my %protected;
-my $pid = getppid();
-while ($pid > 1) {
-  if (open my $fh, '<', "/proc/$pid/cgroup") {
-    while (<$fh>) {
-      if (m{/([^/]+\.(service|scope|slice))\s*$}) {
-        $protected{$1} = 1;
-        print "  PID $pid -> $1\n";
-        last;
-      }
+readarray -t PROTECTED < <(perl -e '
+  my (%u, $pid) = ((), getppid());
+  while ($pid > 1) {
+    if (open my $fh, "<", "/proc/$pid/cgroup") {
+      while (<$fh>) { $u{$1}++ && last if m{/([^/]+\.(service|scope|slice))\s*$} }
     }
+    open my $f, "<", "/proc/$pid/stat" or last;
+    $pid = (split " ", <$f>)[3];
   }
-  open my $sf, '<', "/proc/$pid/stat" or last;
-  $pid = (split ' ', <$sf>)[3];
-}
-my @protected = sort keys %protected;
-print "Protected: @protected\n";
+  print "$_\n" for sort keys %u;
+')
+echo "Protected: ${PROTECTED[*]}"
 
 # build
-my %nix_args = (
-  configPath => $config,      nixpkgsSrc => $nixpkgs,
-  rootDevice => $root_dev,    rootFsType => $root_fs,
-  nixDevice  => $nix_dev,     nixFsType  => $nix_fs,
-  dnsServers => $dns,         username   => scalar cap('whoami'),
-  userHome   => $ENV{HOME},   userUid    => scalar cap('id -u'),
-);
-my $system = cap(join ' ',
-  'nix-build', "'$dir/system.nix'",
-  (map { "--argstr $_ '$nix_args{$_}'" } sort keys %nix_args),
-  '--no-out-link',
-);
-die "nix-build failed\n" unless $system;
-print "Built: $system (", cap("nix path-info -rSh '$system' 2>/dev/null | tail -1") || '?', ")\n";
+SYSTEM=$(nix-build "$SCRIPT_DIR/system.nix" \
+  --argstr configPath  "$CONFIG_PATH" \
+  --argstr nixpkgsSrc  "$NIXPKGS" \
+  --argstr rootDevice  "$ROOT_DEV" \
+  --argstr rootFsType  "$ROOT_FSTYPE" \
+  --argstr nixDevice   "${NIX_DEV:-}" \
+  --argstr nixFsType   "${NIX_FSTYPE:-}" \
+  --argstr dnsServers  "$DNS" \
+  --argstr username    "$(whoami)" \
+  --argstr userHome    "$HOME" \
+  --argstr userUid     "$(id -u)" \
+  --no-out-link)
+echo "Built: $SYSTEM ($(nix path-info -rSh "$SYSTEM" 2>/dev/null | tail -1))"
 
-my $nix_env  = cap('which nix-env');
-my $ld_paths = cap(q{find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | grep -v '^#' | tr '\n' ' '});
+NIX_ENV=$(which nix-env)
+LD_PATHS=$(find /etc/ld.so.conf.d -name '*.conf' -exec cat {} + 2>/dev/null | grep -v '^#' | tr '\n' ' ' || true)
 
-# all privileged work goes through one root shell
-open my $root, '|-', 'sudo', 'bash' or die "sudo bash: $!\n";
-sub sh { print $root "$_\n" for @_ }
-
-sh 'set -euo pipefail';
+# everything below needs root — one sudo bash to avoid exec-after-nix-build issues
+sudo bash <<ROOTSHELL
+set -euo pipefail
 
 # shield ancestor units from isolate
-for my $unit (@protected) {
-  sh "mkdir -p '/etc/systemd/system/${unit}.d'";
-  sh "printf '[Unit]\\nIgnoreOnIsolate=yes\\nX-StopOnRemoval=false\\nX-StopOnReconfiguration=false\\n' > '/etc/systemd/system/${unit}.d/protect.conf'";
-}
-sh 'systemctl daemon-reload',
-   'echo "Isolating to rescue.target..."',
-   'systemctl isolate rescue.target';
+for UNIT in ${PROTECTED[*]}; do
+  mkdir -p "/etc/systemd/system/\${UNIT}.d"
+  printf '[Unit]\nIgnoreOnIsolate=yes\nX-StopOnRemoval=false\nX-StopOnReconfiguration=false\n' \
+    > "/etc/systemd/system/\${UNIT}.d/protect.conf"
+done
+systemctl daemon-reload
+
+echo "Isolating to rescue.target..."
+systemctl isolate rescue.target
 
 # preserve protected units in /run so they survive /etc takeover
-for my $unit (@protected) {
-  sh "[ -f '/etc/systemd/system/$unit' ] && cp '/etc/systemd/system/$unit' '/run/systemd/system/$unit' || true";
-  sh "[ -d '/etc/systemd/system/${unit}.d' ] && mkdir -p '/run/systemd/system/${unit}.d' && cp -a '/etc/systemd/system/${unit}.d/.' '/run/systemd/system/${unit}.d/' || true";
-}
+for UNIT in ${PROTECTED[*]}; do
+  [ -f "/etc/systemd/system/\$UNIT" ] && cp "/etc/systemd/system/\$UNIT" "/run/systemd/system/\$UNIT" || true
+  [ -d "/etc/systemd/system/\${UNIT}.d" ] && mkdir -p "/run/systemd/system/\${UNIT}.d" && cp -a "/etc/systemd/system/\${UNIT}.d/." "/run/systemd/system/\${UNIT}.d/" || true
+done
 
 # clear host paths that conflict with NixOS
-sh 'mkdir -p /etc.bak';
-for my $d (qw(/etc/systemd/system /etc/systemd/user /etc/systemd/system-generators
-              /etc/dbus-1 /etc/fonts /etc/terminfo)) {
-  (my $bak = $d) =~ s{/}{_}g;
-  sh "[ -d '$d' ] && [ ! -L '$d' ] && mv '$d' '/etc.bak/$bak' || true";
-}
-sh "[ -e /lib64 ] && mv /lib64 /lib64.bak || true",
-   'systemctl daemon-reload';
+mkdir -p /etc.bak
+for D in /etc/systemd/system /etc/systemd/user /etc/systemd/system-generators /etc/dbus-1 /etc/fonts /etc/terminfo; do
+  [ -d "\$D" ] && [ ! -L "\$D" ] && mv "\$D" "/etc.bak/\$(echo \$D | tr / _)" || true
+done
+[ -e /lib64 ] && mv /lib64 /lib64.bak || true
+systemctl daemon-reload
 
-# activate
-sh "echo 'Activating NixOS...'",
-   "$nix_env --profile /nix/var/nix/profiles/system --set $system",
-   "ln -sfn /nix/var/nix/profiles/system /run/current-system",
-   "$system/activate",
-   "ldconfig $ld_paths";
+echo "Activating NixOS..."
+$NIX_ENV --profile /nix/var/nix/profiles/system --set $SYSTEM
+ln -sfn /nix/var/nix/profiles/system /run/current-system
+$SYSTEM/activate
+ldconfig $LD_PATHS
 
 # clear host systemd artifacts
-for my $d (qw(/usr/lib/systemd/system /usr/lib/systemd/user
-              /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators
-              /usr/lib/tmpfiles.d /lib/systemd/system)) {
-  sh "[ -d $d ] && mv $d ${d}.bak || true";
-}
+for D in /usr/lib/systemd/system /usr/lib/systemd/user /usr/lib/systemd/system-generators /usr/lib/systemd/user-generators /usr/lib/tmpfiles.d /lib/systemd/system; do
+  [ -d "\$D" ] && mv "\$D" "\${D}.bak" || true
+done
 
-sh "echo 'Starting NixOS services...'",
-   '/run/current-system/sw/bin/systemctl daemon-reload',
-   '/run/current-system/sw/bin/systemd-tmpfiles --create --remove',
-   '/run/current-system/sw/bin/systemctl start multi-user.target',
-   '/run/current-system/sw/bin/systemctl is-system-running --wait || true';
+echo "Starting NixOS services..."
+/run/current-system/sw/bin/systemctl daemon-reload
+/run/current-system/sw/bin/systemd-tmpfiles --create --remove
+/run/current-system/sw/bin/systemctl start multi-user.target
+/run/current-system/sw/bin/systemctl is-system-running --wait || true
 
-# verify inside root shell where systemctl works
-sh 'STATUS=$(/run/current-system/sw/bin/systemctl is-system-running || true)',
-   'echo "System: $STATUS"',
-   '[ "$STATUS" = "running" ] || { /run/current-system/sw/bin/systemctl --failed --no-pager; exit 1; }',
-   'sudo -n true || exit 1';
+STATUS=\$(/run/current-system/sw/bin/systemctl is-system-running || true)
+echo "System: \$STATUS"
+if [ "\$STATUS" != "running" ]; then
+  /run/current-system/sw/bin/systemctl --failed --no-pager
+  exit 1
+fi
+sudo -n true || exit 1
+ROOTSHELL
 
-close $root or die "activation failed\n";
-
-if ($ENV{GITHUB_PATH}) {
-  open my $fh, '>>', $ENV{GITHUB_PATH} or die $!;
-  print $fh "/run/wrappers/bin\n/run/current-system/sw/bin\n";
-}
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "/run/wrappers/bin" >> "$GITHUB_PATH"
+  echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
+fi
