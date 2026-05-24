@@ -35,5 +35,5 @@ runs:
       shell: bash
       run: |-
         timeout 120 systemctl is-system-running --wait || true
-        echo "System state: $(systemctl is-system-running 2>&1 || true)"
-        systemctl --failed || true
+        echo "System state: $(timeout 10 systemctl is-system-running 2>&1 || true)"
+        timeout 10 systemctl --failed || true

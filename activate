@@ -127,7 +127,7 @@ umount -l "$NEW_ROOT/proc"
 umount -l "$NEW_ROOT/dev"
 
 # protect ancestor units: survive the soft-reboot kill phase
-for UNIT in ${PROTECTED[*]} nix-daemon.service; do
+for UNIT in ${PROTECTED[*]} nix-daemon.service walinuxagent.service; do
   mkdir -p "/run/systemd/system/\${UNIT}.d"
   cat > "/run/systemd/system/\${UNIT}.d/survive.conf" <<UNITCONF
 [Unit]
