@@ -83,7 +83,10 @@ systemctl daemon-reload
 tar czf /tmp/etc-snapshot.tar.gz -C / etc 2>/dev/null || true
 
 # rescue.service runs sulogin, which blocks waiting for a TTY that doesn't exist on headless systems
-systemctl mask rescue.service
+mkdir -p /etc/systemd/system/rescue.service.d
+printf '[Service]\nExecStart=\nExecStart=/bin/true\n' \
+  > /etc/systemd/system/rescue.service.d/no-sulogin.conf
+systemctl daemon-reload
 
 echo "Isolating to rescue.target..."
 systemctl isolate rescue.target
