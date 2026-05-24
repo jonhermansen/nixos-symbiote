@@ -94,9 +94,13 @@ mount --bind /nix "$NEW_ROOT/nix"
 # /home: pass through so agent and user data survive
 mount --bind /home "$NEW_ROOT/home"
 
-# kernel modules must match the running kernel, not the NixOS-built kernel
+# kernel modules and firmware must match the running kernel, not the NixOS-built kernel
 mkdir -p "$NEW_ROOT/lib/modules"
 mount --bind /lib/modules "$NEW_ROOT/lib/modules"
+if [ -d /lib/firmware ]; then
+  mkdir -p "$NEW_ROOT/lib/firmware"
+  mount --bind /lib/firmware "$NEW_ROOT/lib/firmware"
+fi
 
 # mount kernel filesystems for chroot activation
 mount --bind /dev "$NEW_ROOT/dev"
