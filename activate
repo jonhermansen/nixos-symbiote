@@ -65,15 +65,16 @@ my @protected = sort keys %protected;
 print "Protected: @protected\n";
 
 # build
+my %args = (
+  configPath => $config,      nixpkgsSrc => $nixpkgs,
+  rootDevice => $root_dev,    rootFsType => $root_fs,
+  nixDevice  => $nix_dev,     nixFsType  => $nix_fs,
+  dnsServers => $dns,         username   => $user,
+  userHome   => $ENV{HOME},   userUid    => $uid,
+);
 my $system = cap(join ' ',
   'nix-build', "'$dir/system.nix'",
-  map { "--argstr $_ '${{
-    configPath => $config, nixpkgsSrc => $nixpkgs,
-    rootDevice => $root_dev, rootFsType => $root_fs,
-    nixDevice  => $nix_dev,  nixFsType  => $nix_fs,
-    dnsServers => $dns,      username   => $user,
-    userHome   => $ENV{HOME}, userUid   => $uid,
-  }->{$_}}'" } qw(configPath nixpkgsSrc rootDevice rootFsType nixDevice nixFsType dnsServers username userHome userUid),
+  (map { "--argstr $_ '$args{$_}'" } qw(configPath nixpkgsSrc rootDevice rootFsType nixDevice nixFsType dnsServers username userHome userUid)),
   '--no-out-link',
 );
 die "nix-build failed\n" unless $system;
