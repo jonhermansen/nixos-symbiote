@@ -19,20 +19,21 @@ jobs:
           - runner: ubuntu-24.04-riscv
             arch: riscv64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Start background journal tail
+      - name: Start protected journal logger
         run: |
-          sudo journalctl -f -o short-monotonic --no-pager > /tmp/journal.log 2>&1 &
-          echo $! > /tmp/journal-tail.pid
+          sudo systemd-run --unit=journal-logger \
+            --property=DefaultDependencies=no \
+            --property=IgnoreOnIsolate=yes \
+            --property=SurviveFinalKillSignal=yes \
+            bash -c 'journalctl -f -o short-monotonic --no-pager > /tmp/journal.log 2>&1'
       - name: Migrate to NixOS
+        timeout-minutes: 8
         uses: ./
         with:
           configuration: example/configuration.nix
-      - name: Stop journal tail
-        if: always()
-        run: kill $(cat /tmp/journal-tail.pid 2>/dev/null) 2>/dev/null || true
       - name: Post-reboot diagnostics
         if: always()
         run: |
@@ -44,14 +45,18 @@ jobs:
           readlink /run/current-system 2>/dev/null || echo "missing"
           echo "=== uname ==="
           uname -a
-          echo "=== last 50 journal lines ==="
-          journalctl -b --no-pager -n 50 2>/dev/null || true
+          echo "=== last 100 journal lines ==="
+          journalctl --no-pager -n 100 2>/dev/null || true
       - name: Verify NixOS is active
+        if: always()
         run: |
           echo "Current system: $(readlink /run/current-system)"
           which psql && which curl
       - name: Run smoke tests
         run: ./example/smoke-test.sh
+      - name: Stop journal logger
+        if: always()
+        run: sudo systemctl stop journal-logger 2>/dev/null || true
       - name: Upload /etc snapshot
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
