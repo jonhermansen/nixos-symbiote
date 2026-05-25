@@ -72,9 +72,17 @@ func ensureNix() string {
 	if p, err := exec.LookPath("nix-build"); err == nil {
 		return filepath.Dir(p)
 	}
+	for _, p := range []string{
+		"/nix/var/nix/profiles/default/bin/nix-build",
+		filepath.Join(os.Getenv("HOME"), ".nix-profile/bin/nix-build"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return filepath.Dir(p)
+		}
+	}
 
 	if _, err := os.Stat("/nix"); err == nil {
-		log.Fatal("/nix exists but nix-build not in PATH — refusing to clobber existing installation")
+		log.Fatal("/nix exists but nix-build not found — refusing to clobber existing installation")
 	}
 
 	log.Println("nix not found, bootstrapping...")
