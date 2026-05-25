@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Start background journal tail
         run: |
-          sudo journalctl -f -o short-monotonic --no-pager &
+          sudo journalctl -f -o short-monotonic --no-pager > /tmp/journal.log 2>&1 &
           echo $! > /tmp/journal-tail.pid
       - name: Migrate to NixOS
         uses: ./
@@ -58,6 +58,13 @@ jobs:
         with:
           name: etc-snapshot-${{ matrix.arch }}
           path: /tmp/etc-snapshot.tar.gz
+          if-no-files-found: ignore
+      - name: Upload journal log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: journal-${{ matrix.arch }}
+          path: /tmp/journal.log
           if-no-files-found: ignore
       - name: Debug via SSH
         if: failure()
