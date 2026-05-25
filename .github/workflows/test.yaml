@@ -22,10 +22,30 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start background journal tail
+        run: |
+          sudo journalctl -f -o short-monotonic --no-pager &
+          echo $! > /tmp/journal-tail.pid
       - name: Migrate to NixOS
         uses: ./
         with:
           configuration: example/configuration.nix
+      - name: Stop journal tail
+        if: always()
+        run: kill $(cat /tmp/journal-tail.pid 2>/dev/null) 2>/dev/null || true
+      - name: Post-reboot diagnostics
+        if: always()
+        run: |
+          echo "=== system state ==="
+          systemctl is-system-running 2>/dev/null || true
+          echo "=== failed units ==="
+          systemctl --failed --no-pager 2>/dev/null || true
+          echo "=== current-system ==="
+          readlink /run/current-system 2>/dev/null || echo "missing"
+          echo "=== uname ==="
+          uname -a
+          echo "=== last 50 journal lines ==="
+          journalctl -b --no-pager -n 50 2>/dev/null || true
       - name: Verify NixOS is active
         run: |
           echo "Current system: $(readlink /run/current-system)"
