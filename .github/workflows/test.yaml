@@ -29,11 +29,22 @@ jobs:
             --property=IgnoreOnIsolate=yes \
             --property=SurviveFinalKillSignal=yes \
             bash -c 'journalctl -f -o short-monotonic --no-pager > /tmp/journal.log 2>&1'
-      - name: Migrate to NixOS
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
+      - name: Build NixOS
         timeout-minutes: 8
-        uses: ./
-        with:
-          configuration: example/configuration.nix
+        run: sudo -E bash ./activate example/configuration.nix
+      - name: Wait for NixOS
+        timeout-minutes: 5
+        run: |
+          for i in $(seq 1 90); do
+            state=$(timeout 5 systemctl is-system-running 2>/dev/null || true)
+            echo "[$i] $state"
+            [ "$state" = "running" ] || [ "$state" = "degraded" ] && exit 0
+            sleep 2
+          done
+          echo "Timed out waiting for system"
+          exit 1
       - name: Post-reboot diagnostics
         if: always()
         run: |
