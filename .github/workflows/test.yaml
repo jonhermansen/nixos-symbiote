@@ -33,7 +33,20 @@ jobs:
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
       - name: Build NixOS
         timeout-minutes: 8
-        run: sudo -E bash ./activate example/configuration.nix
+        run: |
+          echo "=== pre-migration cgroup tree ==="
+          cat /proc/self/cgroup
+          echo "=== PID $$ parent chain ==="
+          pid=$$; while [ "$pid" -gt 1 ]; do
+            echo "pid=$pid cgroup=$(cat /proc/$pid/cgroup 2>/dev/null)"
+            pid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null) || break
+          done
+          echo "=== running in protected scope ==="
+          sudo systemd-run --scope \
+            --property=DefaultDependencies=no \
+            --property=IgnoreOnIsolate=yes \
+            --property=SurviveFinalKillSignal=yes \
+            bash -c 'cat /proc/self/cgroup && bash ./activate example/configuration.nix'
       - name: Wait for NixOS
         timeout-minutes: 5
         run: |
