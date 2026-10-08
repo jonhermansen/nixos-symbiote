@@ -17,73 +17,143 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Pre-flight runner inventory (streamed)
+        run: |
+          echo "=== all Runner.* / Actions processes ==="
+          sudo ps -eo pid,ppid,user,comm,args | grep -i -E 'runner|action' | grep -v grep || true
+          echo "=== cgroup for each Runner.Listener / Runner.Worker ==="
+          for pid in $(pgrep -f 'Runner\.(Listener|Worker)' || true); do
+            echo "--- pid=$pid ---"
+            sudo cat /proc/$pid/cgroup 2>/dev/null || echo "<gone>"
+            sudo tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null; echo
+          done
+          echo "=== own cgroup ==="
+          cat /proc/self/cgroup
+          echo "=== all .scope units ==="
+          systemctl list-units --type=scope --no-pager --all || true
+
+      - name: Prepare persistent trace dir
+        run: |
+          sudo mkdir -p /var/log/symbiote
+          sudo chmod 755 /var/log/symbiote
+          : | sudo tee /var/log/symbiote/trace.log /var/log/symbiote/watchdog.log /var/log/symbiote/journal.log > /dev/null
+          echo "boot=$(date -u +%s) runner=${{ matrix.runner }}" | sudo tee /var/log/symbiote/boot-id
+
+      - name: Start protected watchdog (writes to disk)
+        run: |
+          sudo systemd-run --unit=symbiote-watchdog \
+            --property=DefaultDependencies=no \
+            --property=IgnoreOnIsolate=yes \
+            --property=SurviveFinalKillSignal=yes \
+            bash -c '
+              exec >> /var/log/symbiote/watchdog.log 2>&1
+              while true; do
+                ts=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+                state=$(timeout 2 systemctl is-system-running 2>&1 || echo UNREACHABLE)
+                nixos=$(test -f /etc/NIXOS && echo yes || echo no)
+                osid=$(sed -n "s/^ID=//p" /etc/os-release 2>/dev/null || echo unknown)
+                runners=$(pgrep -f "Runner\.(Listener|Worker)" | tr "\n" " ")
+                echo "WD $ts state=$state nixos=$nixos os=$osid runners=[$runners]"
+                sleep 1
+              done
+            '
+
       - name: Start protected journal logger
         run: |
           sudo systemd-run --unit=journal-logger \
             --property=DefaultDependencies=no \
             --property=IgnoreOnIsolate=yes \
             --property=SurviveFinalKillSignal=yes \
-            bash -c 'journalctl -f -o short-monotonic --no-pager > /tmp/journal.log 2>&1'
+            bash -c 'journalctl -f -o short-monotonic --no-pager >> /var/log/symbiote/journal.log 2>&1'
+
       - name: Install Nix
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
-      - name: Build and run nixos-symbiote
-        timeout-minutes: 8
+
+      # Combined build + activate + wait into one step so step-level timeout
+      # fires on a hang (step failure allows if:always() to run later), AND
+      # live-tail the on-disk logs to this step's stdout so GH captures them
+      # in real time up to the moment Worker dies.
+      - name: Build, activate, and wait for NixOS
+        timeout-minutes: 10
         run: |
           nix shell nixpkgs#go -c go build -o nixos-symbiote .
+
+          # Live-tail trace and watchdog to this shell's stdout. GH streams
+          # stdout to the run log in real time; this is the only data we are
+          # guaranteed to recover on job-level cancellation.
+          sudo tail -F -n 0 /var/log/symbiote/trace.log /var/log/symbiote/watchdog.log &
+          TAIL_PID=$!
+          trap "sudo kill $TAIL_PID 2>/dev/null || true" EXIT
+
+          echo "=== invoking activator ==="
           sudo ./nixos-symbiote --config example/configuration.nix
-      - name: Wait for NixOS
-        timeout-minutes: 5
-        run: |
+          echo "=== activator returned, waiting for NixOS ==="
+
           for i in $(seq 1 90); do
-            state=$(timeout 5 systemctl is-system-running 2>/dev/null || true)
-            echo "[$i] $state"
-            [ "$state" = "running" ] || [ "$state" = "degraded" ] && exit 0
+            state=$(timeout 5 systemctl is-system-running 2>/dev/null || echo UNREACHABLE)
+            osid=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null || echo unknown)
+            echo "WAIT [$i] state=$state os=$osid"
+            if [ "$osid" = "nixos" ] && { [ "$state" = "running" ] || [ "$state" = "degraded" ]; }; then
+              echo "=== NixOS reached (state=$state) ==="
+              sleep 2
+              exit 0
+            fi
             sleep 2
           done
-          echo "Timed out waiting for system"
+          echo "=== timed out waiting (state=$state os=$osid) ==="
           exit 1
+
       - name: Post-reboot diagnostics
         if: always()
         run: |
           echo "=== system state ==="
           systemctl is-system-running 2>/dev/null || true
+          echo "=== /etc/os-release ==="
+          cat /etc/os-release 2>/dev/null || true
           echo "=== failed units ==="
           systemctl --failed --no-pager 2>/dev/null || true
-          echo "=== current-system ==="
-          readlink /run/current-system 2>/dev/null || echo "missing"
+          echo "=== list-jobs ==="
+          systemctl list-jobs --no-pager 2>/dev/null || true
           echo "=== uname ==="
           uname -a
-          echo "=== last 100 journal lines ==="
-          journalctl --no-pager -n 100 2>/dev/null || true
-      - name: Verify NixOS is active
+          echo "=== trace tail ==="
+          sudo tail -300 /var/log/symbiote/trace.log 2>/dev/null || echo "no trace"
+          echo "=== watchdog tail ==="
+          sudo tail -200 /var/log/symbiote/watchdog.log 2>/dev/null || echo "no watchdog"
+
+      - name: Run smoke tests
+        if: success()
+        run: ./example/smoke-test.sh
+
+      - name: Collect diagnostics for upload
         if: always()
         run: |
-          echo "Current system: $(readlink /run/current-system)"
-          which psql && which curl
-      - name: Run smoke tests
-        run: ./example/smoke-test.sh
-      - name: Stop journal logger
-        if: always()
-        run: sudo systemctl stop journal-logger 2>/dev/null || true
-      - name: Upload /etc snapshot
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: etc-snapshot-${{ matrix.arch }}
-          path: /tmp/etc-snapshot.tar.gz
-          if-no-files-found: ignore
-      - name: Upload journal log
+          sudo mkdir -p /tmp/symbiote-upload
+          sudo cp -a /var/log/symbiote /tmp/symbiote-upload/ 2>/dev/null || true
+          sudo cp -a /var/log/journal /tmp/symbiote-upload/var-log-journal 2>/dev/null || true
+          sudo cp -a /run/log/journal /tmp/symbiote-upload/run-log-journal 2>/dev/null || true
+          sudo journalctl --list-boots > /tmp/symbiote-upload/boots.txt 2>&1 || true
+          sudo journalctl --no-pager -b -1 > /tmp/symbiote-upload/journal-prev-boot.txt 2>&1 || true
+          sudo journalctl --no-pager -b 0  > /tmp/symbiote-upload/journal-this-boot.txt 2>&1 || true
+          sudo systemctl list-units --no-pager --all > /tmp/symbiote-upload/units.txt 2>&1 || true
+          sudo chmod -R a+r /tmp/symbiote-upload || true
+
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: journal-${{ matrix.arch }}
-          path: /tmp/journal.log
-          if-no-files-found: ignore
-      - name: Debug via SSH
-        if: failure()
+          name: diagnostics-${{ matrix.arch }}
+          path: /tmp/symbiote-upload/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Debug via SSH (step-level failure only)
+        if: ${{ failure() }}
+        timeout-minutes: 10
         uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3.23
         with:
           limit-access-to-actor: true
