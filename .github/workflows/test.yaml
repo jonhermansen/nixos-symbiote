@@ -116,20 +116,43 @@ jobs:
           echo "=== activator returned exit=$? ==="
 
       - name: Wait for NixOS
-        timeout-minutes: 5
+        timeout-minutes: 4
         run: |
-          for i in $(seq 1 90); do
-            state=$(timeout 5 systemctl is-system-running 2>/dev/null || echo UNREACHABLE)
-            osid=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null || echo unknown)
-            echo "WAIT [$i] state=$state os=$osid"
-            if [ "$osid" = "nixos" ] && { [ "$state" = "running" ] || [ "$state" = "degraded" ]; }; then
-              echo "=== NixOS reached (state=$state) ==="
-              exit 0
-            fi
-            sleep 2
+          set -u
+          # Dump cheap sanity info first so we learn SOMETHING even if the
+          # system is misbehaving. These don't need systemctl.
+          echo "=== static sanity (no systemd needed) ==="
+          uname -a || true
+          cat /proc/1/comm 2>/dev/null | tr -d '\n'; echo " (pid 1 comm)"
+          readlink /proc/1/exe 2>/dev/null | tr -d '\n'; echo " (pid 1 exe)"
+          cat /etc/os-release 2>/dev/null || echo "(no /etc/os-release)"
+          readlink /sbin/init 2>/dev/null | tr -d '\n'; echo " (sbin/init)"
+          ls /nix/store 2>/dev/null | head -3 || echo "(no /nix/store)"
+          readlink /run/current-system 2>/dev/null | tr -d '\n'; echo " (current-system)"
+          echo "=== dmesg tail (last 60 kernel lines) ==="
+          sudo dmesg --nopager 2>/dev/null | tail -60 || true
+          echo "=== runner _diag listing ==="
+          sudo ls -la /home/runner/runners/*/_diag/ 2>/dev/null | head -20 || echo "(no runner _diag found)"
+          echo "=== polling for pivot to NixOS ==="
+          # Condition-based wait — no magic numbers. The step timeout bounds us.
+          tick=0
+          until osid=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null) && [ "$osid" = "nixos" ]; do
+            tick=$((tick+1))
+            pid1_comm=$(cat /proc/1/comm 2>/dev/null)
+            pid1_exe=$(readlink /proc/1/exe 2>/dev/null)
+            echo "T$tick os=${osid:-unknown} pid1=$pid1_comm exe=$pid1_exe"
+            sleep 1
           done
-          echo "=== timed out waiting (state=$state os=$osid) ==="
-          exit 1
+          echo "=== /etc/os-release says NixOS; waiting for systemd ready ==="
+          while :; do
+            state=$(timeout 10 systemctl is-system-running 2>&1 || echo "UNREACHABLE:$?")
+            echo "SYSTEM: $state"
+            case "$state" in
+              running|degraded) echo "=== OK state=$state ==="; break ;;
+            esac
+            sleep 1
+          done
+          systemctl --failed --no-pager || true
 
       - name: Post-reboot diagnostics
         if: always()
@@ -167,6 +190,8 @@ jobs:
           sudo journalctl --no-pager -b -1 > /tmp/symbiote-upload/journal-prev-boot.txt 2>&1 || true
           sudo journalctl --no-pager -b 0  > /tmp/symbiote-upload/journal-this-boot.txt 2>&1 || true
           sudo systemctl list-units --no-pager --all > /tmp/symbiote-upload/units.txt 2>&1 || true
+          sudo dmesg --nopager > /tmp/symbiote-upload/dmesg.txt 2>&1 || true
+          sudo cp -a /home/runner/runners/*/_diag /tmp/symbiote-upload/runner-diag 2>/dev/null || true
           sudo chmod -R a+r /tmp/symbiote-upload || true
 
       - name: Upload diagnostics
@@ -178,9 +203,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Debug via SSH (step-level failure only)
-        if: ${{ failure() }}
-        timeout-minutes: 10
+      - name: Debug via SSH (any non-success)
+        if: ${{ failure() || cancelled() }}
+        timeout-minutes: 15
         uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3.23
         with:
           limit-access-to-actor: true
