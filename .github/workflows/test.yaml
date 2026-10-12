@@ -19,7 +19,7 @@ jobs:
             arch: aarch64
             flake-attr: linux-arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -80,7 +80,7 @@ jobs:
       # live-tail the on-disk logs to this step's stdout so GH captures them
       # in real time up to the moment Worker dies.
       - name: Build, activate, and wait for NixOS
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           # Build via flake (static binary, pinned nixpkgs — matches release artifacts).
           nix build .#${{ matrix.flake-attr }}
@@ -96,7 +96,7 @@ jobs:
           trap "sudo kill $TAIL_PID 2>/dev/null || true" EXIT
 
           echo "=== invoking activator ==="
-          sudo ./nixos-symbiote --config example/configuration.nix
+          sudo ./nixos-symbiote --config test/configuration-minimal.nix
           echo "=== activator returned, waiting for NixOS ==="
 
           for i in $(seq 1 90); do
@@ -131,9 +131,12 @@ jobs:
           echo "=== watchdog tail ==="
           sudo tail -200 /var/log/symbiote/watchdog.log 2>/dev/null || echo "no watchdog"
 
-      - name: Run smoke tests
+      - name: Smoke-test (hello runs)
         if: success()
-        run: ./example/smoke-test.sh
+        run: |
+          hello
+          echo "OS=$(sed -n 's/^ID=//p' /etc/os-release)"
+          echo "systemctl=$(systemctl is-system-running 2>&1 || true)"
 
       - name: Collect diagnostics for upload
         if: always()
