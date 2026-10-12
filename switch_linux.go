@@ -47,7 +47,70 @@ func switchSystem(nixBin, system string) error {
 	trace("activate", "done")
 
 	protect(protected)
+	// Migrate the GH runner (Listener + Worker) into our protected scope.
+	// This is more robust than drop-ins alone — the kernel cgroup is what
+	// soft-reboot's isolate uses, not systemd's bookkeeping. See migrateRunner.
+	migrateRunnerToOurScope()
 	return softReboot(newRoot)
+}
+
+// migrateRunnerToOurScope writes our ancestor chain + GH runner PIDs into
+// our protected scope's cgroup.procs. The kernel moves them into our cgroup;
+// systemd's bookkeeping may be inconsistent afterwards, but the kernel-level
+// cgroup is what soft-reboot's isolate uses — our survival properties now
+// apply to the migrated PIDs. After this: our step shell, Runner.Worker,
+// Runner.Listener all survive pivot_root. Shell can finish normally,
+// Worker reports step completion, Listener's reconnect handles the brief
+// network blip during pivot.
+func migrateRunnerToOurScope() {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		trace("migrate", "read own cgroup: %v (skipping)", err)
+		return
+	}
+	line := strings.TrimSpace(string(data))
+	parts := strings.SplitN(line, "::", 2)
+	if len(parts) < 2 {
+		trace("migrate", "unparseable cgroup line: %q (skipping)", line)
+		return
+	}
+	procsFile := filepath.Join("/sys/fs/cgroup", parts[1], "cgroup.procs")
+
+	moved := map[int]bool{os.Getpid(): true}
+	migrate := func(pid int, why string) {
+		if moved[pid] || pid < 2 {
+			return
+		}
+		if err := os.WriteFile(procsFile, []byte(strconv.Itoa(pid)+"\n"), 0644); err != nil {
+			trace("migrate", "pid=%d (%s) FAILED: %v", pid, why, err)
+			return
+		}
+		moved[pid] = true
+		cmd, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+		trace("migrate", "pid=%d (%s, comm=%s) → %s", pid, why,
+			strings.TrimSpace(string(cmd)), procsFile)
+	}
+
+	// Walk our ancestor chain — shell, sudo, Worker, Listener, their parents.
+	pid := os.Getppid()
+	for pid > 1 {
+		migrate(pid, "ancestor")
+		pid = ppidOf(pid)
+	}
+
+	// Any Runner.* processes not already migrated (siblings of our chain).
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		cmd, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		s := string(cmd)
+		if strings.Contains(s, "Runner.Listener") || strings.Contains(s, "Runner.Worker") {
+			migrate(pid, "runner")
+		}
+	}
 }
 
 // --- tracing ---
@@ -309,6 +372,13 @@ func protect(units []string) {
 }
 
 // --- soft-reboot ---
+//
+// Fire immediately. We've migrated our ancestor chain (shell, sudo, Worker,
+// Listener) into our protected scope's cgroup, so they survive pivot_root.
+// Shell exits normally after our activator exits, Worker reads the exit
+// code and reports step completion, Listener's TCP long-poll briefly
+// drops during the network tear-down and reconnects per its built-in
+// retry logic (15-30s random backoff — see Runner.Listener/MessageListener.cs).
 
 func softReboot(newRoot string) error {
 	syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, "")

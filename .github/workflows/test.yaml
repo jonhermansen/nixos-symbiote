@@ -74,38 +74,56 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
+        with:
+          extra_nix_config: |
+            extra-substituters = s3://nixos-symbiote?endpoint=${{ secrets.R2_ENDPOINT }}&region=auto
+            extra-trusted-public-keys = nixos-symbiote-2:04hzKpsfZ75z6MW8kpALD2gfLuCdnP5fbGdyjHNbsCM=
 
-      # Combined build + activate + wait into one step so step-level timeout
-      # fires on a hang (step failure allows if:always() to run later), AND
-      # live-tail the on-disk logs to this step's stdout so GH captures them
-      # in real time up to the moment Worker dies.
-      - name: Build, activate, and wait for NixOS
-        timeout-minutes: 20
+      - name: Build symbiote binary
+        timeout-minutes: 10
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          # Build via flake (static binary, pinned nixpkgs — matches release artifacts).
           nix build .#${{ matrix.flake-attr }}
           cp result/bin/nixos-symbiote ./nixos-symbiote
           chmod +x ./nixos-symbiote
           ./nixos-symbiote --version
+          file ./nixos-symbiote
 
-          # Live-tail trace and watchdog to this shell's stdout. GH streams
-          # stdout to the run log in real time; this is the only data we are
-          # guaranteed to recover on job-level cancellation.
+      - name: Push build to R2 cache
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          NIX_CACHE_PRIV_KEY: ${{ secrets.NIX_CACHE_PRIV_KEY }}
+        run: |
+          echo "$NIX_CACHE_PRIV_KEY" > /tmp/cache-priv.key
+          nix store sign --key-file /tmp/cache-priv.key --recursive ./result
+          nix copy --to "s3://nixos-symbiote?endpoint=${{ secrets.R2_ENDPOINT }}&region=auto" ./result
+          rm -f /tmp/cache-priv.key
+
+      - name: Invoke activator (triggers soft-reboot)
+        timeout-minutes: 15
+        run: |
+          # Live-tail trace+watchdog to stdout — the only data recoverable
+          # if the shell dies before status report.
           sudo tail -F -n 0 /var/log/symbiote/trace.log /var/log/symbiote/watchdog.log &
           TAIL_PID=$!
           trap "sudo kill $TAIL_PID 2>/dev/null || true" EXIT
-
           echo "=== invoking activator ==="
           sudo ./nixos-symbiote --config test/configuration-minimal.nix
-          echo "=== activator returned, waiting for NixOS ==="
+          echo "=== activator returned exit=$? ==="
 
+      - name: Wait for NixOS
+        timeout-minutes: 5
+        run: |
           for i in $(seq 1 90); do
             state=$(timeout 5 systemctl is-system-running 2>/dev/null || echo UNREACHABLE)
             osid=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null || echo unknown)
             echo "WAIT [$i] state=$state os=$osid"
             if [ "$osid" = "nixos" ] && { [ "$state" = "running" ] || [ "$state" = "degraded" ]; }; then
               echo "=== NixOS reached (state=$state) ==="
-              sleep 2
               exit 0
             fi
             sleep 2

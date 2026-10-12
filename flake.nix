@@ -3,6 +3,17 @@
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
+  # Project binary cache on Cloudflare R2 (bucket: nixos-symbiote).
+  # Local users auto-use it; CI pushes to it.
+  nixConfig = {
+    extra-substituters = [
+      "s3://nixos-symbiote?endpoint=https://e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto"
+    ];
+    extra-trusted-public-keys = [
+      "nixos-symbiote-2:04hzKpsfZ75z6MW8kpALD2gfLuCdnP5fbGdyjHNbsCM="
+    ];
+  };
+
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
