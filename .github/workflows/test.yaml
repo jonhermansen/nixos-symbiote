@@ -152,46 +152,57 @@ jobs:
             esac
             sleep 1
           done
-          systemctl --failed --no-pager || true
+          timeout 5 systemctl --failed --no-pager 2>&1 || true
 
       - name: Post-reboot diagnostics
         if: always()
         run: |
-          echo "=== system state ==="
-          systemctl is-system-running 2>/dev/null || true
+          # No systemctl calls here. systemctl can hang indefinitely on a
+          # broken socket, which would block artifact upload. Use static
+          # file reads only — ENOENT is instant, never hangs.
           echo "=== /etc/os-release ==="
-          cat /etc/os-release 2>/dev/null || true
-          echo "=== failed units ==="
-          systemctl --failed --no-pager 2>/dev/null || true
-          echo "=== list-jobs ==="
-          systemctl list-jobs --no-pager 2>/dev/null || true
+          cat /etc/os-release 2>&1 || echo "(ENOENT)"
+          echo "=== pid 1 comm ==="
+          cat /proc/1/comm 2>/dev/null || echo "(no pid 1??)"
+          echo "=== pid 1 exe ==="
+          readlink /proc/1/exe 2>/dev/null || echo "(no exe)"
+          echo "=== /sbin/init ==="
+          readlink -f /sbin/init 2>/dev/null || echo "(none)"
+          echo "=== /run/current-system ==="
+          readlink /run/current-system 2>/dev/null || echo "(none)"
+          echo "=== /nix/store sample ==="
+          ls /nix/store 2>/dev/null | head -5 || echo "(no /nix/store)"
+          echo "=== /run/systemd/system active ==="
+          ls /run/systemd/system/*.wants/*.target 2>/dev/null | head -10 || echo "(none)"
           echo "=== uname ==="
           uname -a
-          echo "=== trace tail ==="
+          echo "=== dmesg tail ==="
+          sudo dmesg --nopager 2>/dev/null | tail -40 || true
+          echo "=== symbiote trace tail ==="
           sudo tail -300 /var/log/symbiote/trace.log 2>/dev/null || echo "no trace"
-          echo "=== watchdog tail ==="
+          echo "=== symbiote watchdog tail ==="
           sudo tail -200 /var/log/symbiote/watchdog.log 2>/dev/null || echo "no watchdog"
+          echo "=== symbiote journal tail ==="
+          sudo tail -100 /var/log/symbiote/journal.log 2>/dev/null || echo "no journal"
 
       - name: Smoke-test (hello runs)
         if: success()
         run: |
           hello
           echo "OS=$(sed -n 's/^ID=//p' /etc/os-release)"
-          echo "systemctl=$(systemctl is-system-running 2>&1 || true)"
 
       - name: Collect diagnostics for upload
         if: always()
         run: |
+          # Static file copies only — never calls systemctl/journalctl which can
+          # hang. The journal files (if any) are copied via cp from on-disk paths.
           sudo mkdir -p /tmp/symbiote-upload
           sudo cp -a /var/log/symbiote /tmp/symbiote-upload/ 2>/dev/null || true
           sudo cp -a /var/log/journal /tmp/symbiote-upload/var-log-journal 2>/dev/null || true
           sudo cp -a /run/log/journal /tmp/symbiote-upload/run-log-journal 2>/dev/null || true
-          sudo journalctl --list-boots > /tmp/symbiote-upload/boots.txt 2>&1 || true
-          sudo journalctl --no-pager -b -1 > /tmp/symbiote-upload/journal-prev-boot.txt 2>&1 || true
-          sudo journalctl --no-pager -b 0  > /tmp/symbiote-upload/journal-this-boot.txt 2>&1 || true
-          sudo systemctl list-units --no-pager --all > /tmp/symbiote-upload/units.txt 2>&1 || true
           sudo dmesg --nopager > /tmp/symbiote-upload/dmesg.txt 2>&1 || true
           sudo cp -a /home/runner/runners/*/_diag /tmp/symbiote-upload/runner-diag 2>/dev/null || true
+          sudo ls -laR /run/systemd/system 2>/dev/null > /tmp/symbiote-upload/run-systemd-system.txt || true
           sudo chmod -R a+r /tmp/symbiote-upload || true
 
       - name: Upload diagnostics
