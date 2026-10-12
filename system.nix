@@ -14,11 +14,28 @@ in
   (import configPath)
   ({ ... }: {
     boot.loader.grub.enable = lib.mkForce false;
-    boot.isContainer = lib.mkForce true;
-    system.stateVersion = lib.mkDefault "25.11";
+    # NOT a container — soft-reboot keeps the host kernel but we have full
+    # kernel capabilities, PIDFDs, cgroup v2, etc. Container mode disables
+    # bits of systemd that break "Failed to spawn executor" post-pivot.
+    boot.isContainer = lib.mkForce false;
+    system.stateVersion = lib.mkDefault "26.05";
 
     fileSystems."/" = lib.mkForce { device = rootDevice; fsType = rootFsType; };
-    fileSystems."/nix" = lib.mkIf hasNixMount (lib.mkForce { device = nixDevice; fsType = nixFsType; });
+    # /nix is either a separate mount on the host (hasNixMount) OR it's a
+    # subdirectory of the host rootfs. In the latter case we tell new systemd
+    # to mount the root device at /nix with x-mount.subdir=nix (systemd 255+)
+    # — this means NixOS's own systemd materializes /nix after pivot_root
+    # instead of relying on a bind mount from the dying old root.
+    fileSystems."/nix" = lib.mkForce (
+      if hasNixMount then
+        { device = nixDevice; fsType = nixFsType; }
+      else
+        { device = rootDevice; fsType = rootFsType; options = [ "x-mount.subdir=nix" ]; }
+    );
+
+    # Tiny /bin/sh — busybox ash. Keeps the symbiote footprint minimal.
+    environment.binsh = "${pkgs.busybox}/bin/sh";
+    environment.systemPackages = lib.mkBefore [ pkgs.busybox ];
 
     networking.useDHCP = lib.mkDefault true;
     networking.nameservers = lib.mkDefault dnsServerList;

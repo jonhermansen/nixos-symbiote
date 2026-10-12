@@ -14,8 +14,10 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
+            flake-attr: linux-amd64
           - runner: ubuntu-24.04-arm
             arch: aarch64
+            flake-attr: linux-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -80,7 +82,11 @@ jobs:
       - name: Build, activate, and wait for NixOS
         timeout-minutes: 10
         run: |
-          nix shell nixpkgs#go -c go build -o nixos-symbiote .
+          # Build via flake (static binary, pinned nixpkgs — matches release artifacts).
+          nix build .#${{ matrix.flake-attr }}
+          cp result/bin/nixos-symbiote ./nixos-symbiote
+          chmod +x ./nixos-symbiote
+          ./nixos-symbiote --version
 
           # Live-tail trace and watchdog to this shell's stdout. GH streams
           # stdout to the run log in real time; this is the only data we are

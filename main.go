@@ -17,8 +17,18 @@ import (
 	"strings"
 )
 
+// Version is injected via -ldflags "-X main.Version=..." at build time
+// (see flake.nix). Default here is overridden; "dev" means unreleased build.
+var Version = "dev"
+
 func main() {
 	log.SetFlags(0)
+	for _, a := range os.Args[1:] {
+		if a == "--version" || a == "-v" {
+			fmt.Println(Version)
+			return
+		}
+	}
 	if err := run(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
@@ -129,11 +139,61 @@ func ensureNix() string {
 	log.Printf("verified %s", expectedHash)
 
 	mustRun(exec.Command("tar", "xJf", tarball, "-C", tmpDir, "--strip-components=1"))
-	mustRun(exec.Command(filepath.Join(tmpDir, "install"), "--no-daemon"))
 
-	nixBin := filepath.Join(os.Getenv("HOME"), ".nix-profile/bin")
-	log.Printf("nix %s bootstrapped", nixVersion)
-	return nixBin
+	// Skip the installer script — it refuses to run as root and insists on
+	// systemd integration for multi-user mode. Manual unpack works
+	// identically for any invoking user and has no conditional behavior:
+	//   1. cp tarball's store/* into /nix/store/
+	//   2. register the paths with nix-store --load-db
+	//   3. return the path to the unpacked nix binary — no profile needed.
+	for _, d := range []string{"/nix/store", "/nix/var/nix/profiles", "/nix/var/nix/gcroots", "/nix/var/nix/temproots", "/nix/var/log/nix", "/etc/nix"} {
+		os.MkdirAll(d, 0755)
+	}
+	mustRun(exec.Command("sh", "-c", fmt.Sprintf("cp -R %s/store/* /nix/store/", tmpDir)))
+
+	// Create the nixbld group + 32 nixbld users that nix expects for
+	// sandbox-isolated builds. Matches what the official installer does.
+	// TODO: platform-specific — move to installer_linux.go / installer_darwin.go.
+	createNixUsers()
+
+	nixConf := "experimental-features = nix-command flakes\nsandbox = true\n"
+	if err := os.WriteFile("/etc/nix/nix.conf", []byte(nixConf), 0644); err != nil {
+		log.Printf("nix.conf write failed (continuing): %v", err)
+	}
+
+	nixStoreBin, err := filepath.Glob(filepath.Join(tmpDir, "store", "*-nix-*", "bin"))
+	if err != nil || len(nixStoreBin) == 0 {
+		log.Fatalf("could not find nix bin under %s/store/*-nix-*/bin", tmpDir)
+	}
+	// Path inside /nix/store, not /tmp.
+	liveBin := filepath.Join("/nix/store", filepath.Base(filepath.Dir(nixStoreBin[0])), "bin")
+
+	// Default profile symlink so the "already installed" fastpath in
+	// ensureNix() finds nix on subsequent invocations (we re-exec into a
+	// protected systemd scope and the child needs to locate nix without
+	// re-bootstrapping).
+	defaultProfile := "/nix/var/nix/profiles/default"
+	os.Remove(defaultProfile)
+	if err := os.Symlink(filepath.Dir(liveBin), defaultProfile); err != nil {
+		log.Printf("default profile symlink: %v (continuing)", err)
+	}
+
+	regInfo := filepath.Join(tmpDir, ".reginfo")
+	loadCmd := exec.Command(filepath.Join(liveBin, "nix-store"), "--load-db")
+	rf, err := os.Open(regInfo)
+	if err != nil {
+		log.Fatalf("open reginfo: %v", err)
+	}
+	defer rf.Close()
+	loadCmd.Stdin = rf
+	loadCmd.Stdout = os.Stdout
+	loadCmd.Stderr = os.Stderr
+	if err := loadCmd.Run(); err != nil {
+		log.Fatalf("nix-store --load-db: %v", err)
+	}
+
+	log.Printf("nix %s bootstrapped (manual unpack, bin=%s)", nixVersion, liveBin)
+	return liveBin
 }
 
 // --- build ---

@@ -1,29 +1,110 @@
 #+TITLE: nixos-symbiote
 
-Activate NixOS on a running systemd system without rebooting.
+Activate NixOS on a running systemd Linux host — without a hard reboot.
 
-Pass a configuration.nix describing the packages and services you
-want. The action builds a NixOS closure, activates it, waits for
-services to come up, and hands control back to your pipeline.
+Pass a =configuration.nix= describing packages and services. The activator
+builds a NixOS closure, pivots your host into it via =systemctl soft-reboot=,
+and hands control back to your pipeline. The host kernel stays; everything
+in userspace becomes NixOS.
 
 * GitHub Action
 
 #+begin_src yaml
-- uses: jonhermansen/nixos-symbiote@master
+- uses: jonhermansen/nixos-symbiote@v0.0.1
   with:
     configuration: ./my-config.nix
 #+end_src
 
-Optionally pass =nixpkgs= to pin a nixpkgs revision and =cachix-name=
-to use a binary cache.
+Optional inputs:
+- =nixpkgs= — pin a nixpkgs revision (defaults to the flake.lock pin)
+- =cachix-name= — enable a Cachix binary cache
+
+For reproducible builds, pin by commit SHA rather than tag:
+
+#+begin_src yaml
+- uses: jonhermansen/nixos-symbiote@<40-char-sha>
+#+end_src
 
 * Standalone
 
 #+begin_src sh
-nix run github:jonhermansen/nixos-symbiote -- ./my-config.nix
+nix run github:jonhermansen/nixos-symbiote -- --config ./my-config.nix
 #+end_src
+
+Or download a release binary from
+https://github.com/jonhermansen/nixos-symbiote/releases and run it
+directly:
+
+#+begin_src sh
+sudo ./nixos-symbiote --config ./my-config.nix
+#+end_src
+
+* How it works
+
+1. Bootstraps =nix= if the host doesn't have it (manual tarball unpack —
+   works as root, no installer-script quirks).
+2. Builds the NixOS system closure from your =configuration.nix= using the
+   bundled =system.nix= as a wrapper (sets rootfs, DNS, users).
+3. Constructs a new root on a dedicated tmpfs at =/nixos-roots/<timestamp>=:
+   bind-mounts =/nix= (MS_PRIVATE), creates =/dev=, =/proc=, =/sys=,
+   writes =/etc= via NixOS activate, drops systemd + systemd-executor
+   symlinks into =/usr/lib/systemd/=.
+4. Walks the cgroup tree to identify processes that must survive — our
+   own ancestor chain, GitHub Actions =Runner.{Listener,Worker}=,
+   =nix-daemon=, =walinuxagent= — and writes systemd drop-ins with
+   =SurviveFinalKillSignal=yes=.
+5. Fires =systemctl soft-reboot=. systemd pivots into the new root; a
+   fresh NixOS systemd takes over as PID 1.
+6. The GitHub Actions runner's long-poll reconnects to GitHub after the
+   network reinitialises; subsequent workflow steps execute inside NixOS.
+
+* Why not hard reboot?
+
+Soft-reboot keeps the host kernel + any processes you've marked to
+survive (in particular, the GitHub Actions runner). A hard reboot would
+drop every open TCP connection and force GitHub to re-queue the job.
 
 * Limitations
 
-The kernel and PID 1 are still the host's. This is not a full
-NixOS installation.
+- Linux + systemd 254+ only. The host must be bootable with
+  =systemctl soft-reboot= available.
+- The host kernel is retained; kernel-level changes require a hard reboot.
+- =boot.kernelParams= in your =configuration.nix= has no effect.
+- Not currently tested on riscv64 (GitHub's riscv64 runners are
+  containers, which can't soft-reboot).
+
+* Development
+
+Boot a local Ubuntu 24.04 ARM VM for interactive testing (requires
+=nix= on your Mac or Linux host):
+
+#+begin_src sh
+nix run .#test-vm
+#+end_src
+
+Then from another terminal, scp the activator in and run it. See
+=test/= for scripts.
+
+Build cross-arch binaries:
+
+#+begin_src sh
+nix build .#linux-amd64 .#linux-arm64
+#+end_src
+
+Validate the project:
+
+#+begin_src sh
+nix flake check
+#+end_src
+
+* Release process
+
+Binaries are not committed. Each tag triggers a release workflow that
+cross-compiles via Nix and uploads =nixos-symbiote-linux-amd64= and
+=nixos-symbiote-linux-arm64= to a GitHub Release. =action.yml= fetches
+the binary matching =github.action_ref=.
+
+#+begin_src sh
+git tag v0.0.2
+git push origin v0.0.2
+#+end_src

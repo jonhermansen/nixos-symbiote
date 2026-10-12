@@ -1,43 +1,52 @@
 name: NixOS Symbiote
-description: Activate NixOS on a running systemd system. No reboot.
+description: Activate NixOS on a running systemd Linux host. No reboot.
 
 inputs:
   configuration:
     description: Path to your NixOS configuration.nix
     required: true
   nixpkgs:
-    description: Nixpkgs revision — defaults to flake.lock pin if empty
-    required: false
-    default: ''
-  cachix-name:
-    description: Cachix cache name (enables binary cache)
+    description: Nixpkgs revision (defaults to the flake.lock pin)
     required: false
     default: ''
 
 runs:
   using: composite
   steps:
-    - name: Install Nix
-      uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
-    - name: Setup Cachix
-      if: inputs.cachix-name != ''
-      uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
-      with:
-        name: ${{ inputs.cachix-name }}
+    - name: Download symbiote binary
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64|amd64)   asset=nixos-symbiote-linux-amd64 ;;
+          aarch64|arm64)  asset=nixos-symbiote-linux-arm64 ;;
+          *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
+        esac
+        ref="${{ github.action_ref }}"
+        : "${ref:=master}"
+        # Resolve ref → release tag. If ref is a tag/SHA that corresponds to a
+        # release, download that release's binary. Otherwise fall back to the
+        # latest release.
+        if gh release view "$ref" --repo jonhermansen/nixos-symbiote >/dev/null 2>&1; then
+          tag="$ref"
+        else
+          tag=$(gh release list --repo jonhermansen/nixos-symbiote --limit 1 --json tagName --jq '.[0].tagName')
+          echo "::warning::ref '$ref' is not a release tag; falling back to latest: $tag"
+        fi
+        gh release download "$tag" \
+          --repo jonhermansen/nixos-symbiote \
+          --pattern "$asset" \
+          --output /usr/local/bin/nixos-symbiote
+        chmod +x /usr/local/bin/nixos-symbiote
+
     - name: Activate NixOS
       shell: bash
-      continue-on-error: true
-      run: |-
-        bash "${{ github.action_path }}/activate" \
-          "${{ inputs.configuration }}" \
-          "${{ inputs.nixpkgs }}"
-    - name: Wait for NixOS
-      shell: bash
-      run: |-
-        for i in $(seq 1 60); do
-          state=$(timeout 5 systemctl is-system-running 2>/dev/null || true)
-          echo "System state: $state"
-          [ "$state" = "running" ] || [ "$state" = "degraded" ] && break
-          sleep 2
-        done
-        timeout 10 systemctl --failed || true
+      run: |
+        set -euo pipefail
+        args=(--config "${{ inputs.configuration }}")
+        if [ -n "${{ inputs.nixpkgs }}" ]; then
+          args+=(--nixpkgs "${{ inputs.nixpkgs }}")
+        fi
+        sudo /usr/local/bin/nixos-symbiote "${args[@]}"
