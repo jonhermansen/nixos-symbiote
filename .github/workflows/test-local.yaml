@@ -23,11 +23,25 @@ jobs:
 
       - name: Install Nix (if missing)
         run: |
-          command -v nix >/dev/null && { echo "nix already installed"; exit 0; }
+          # Source the daemon profile first — nix lives in /nix/var/nix/profiles/default/bin
+          # which isn't in a self-hosted runner's PATH unless explicitly sourced.
+          [ -f /etc/profile.d/nix.sh ] && . /etc/profile.d/nix.sh
+          if command -v nix >/dev/null; then
+            echo "nix already installed at $(command -v nix)"
+            nix --version
+            exit 0
+          fi
+          # Clean stale backups from any previously-aborted install so the
+          # installer doesn't bail with "backup already exists".
+          sudo rm -f /etc/bash.bashrc.backup-before-nix /etc/zshrc.backup-before-nix \
+                     /etc/profile.backup-before-nix /etc/zsh/zshrc.backup-before-nix
           curl -sSL -o /tmp/nix-installer.sh https://nixos.org/nix/install
           sh /tmp/nix-installer.sh --daemon --yes
+          sudo mkdir -p /etc/nix
           echo "experimental-features = nix-command flakes" | sudo tee -a /etc/nix/nix.conf
           sudo systemctl restart nix-daemon
+          . /etc/profile.d/nix.sh
+          nix --version
 
       - name: Build + invoke activator
         timeout-minutes: 8
