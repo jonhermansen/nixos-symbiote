@@ -112,9 +112,6 @@ jobs:
           nix copy --to "s3://nixos-symbiote?endpoint=${{ secrets.R2_ENDPOINT }}&region=auto" ./result
           rm -f /tmp/cache-priv.key
 
-      - name: Install awscli (for diagnostics upload)
-        run: sudo apt-get update -qq && sudo apt-get install -y awscli
-
       - name: Baseline diagnostic upload (pre-pivot)
         # GHA cancellations purge logs AND skip later steps, so R2 is the
         # only reliable escape hatch for pivot-failure diagnostics.
