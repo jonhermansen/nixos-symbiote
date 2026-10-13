@@ -88,7 +88,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          nix build .#${{ matrix.flake-attr }}
+          nix build --accept-flake-config .#${{ matrix.flake-attr }}
           cp result/bin/nixos-symbiote ./nixos-symbiote
           chmod +x ./nixos-symbiote
           ./nixos-symbiote --version
@@ -107,7 +107,7 @@ jobs:
           rm -f /tmp/cache-priv.key
 
       - name: Invoke activator (triggers soft-reboot)
-        timeout-minutes: 15
+        timeout-minutes: 8
         run: |
           # Live-tail trace+watchdog to stdout — the only data recoverable
           # if the shell dies before status report.
@@ -217,9 +217,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Debug via SSH (any non-success)
-        if: ${{ failure() || cancelled() }}
-        timeout-minutes: 15
-        uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3.23
-        with:
-          limit-access-to-actor: true

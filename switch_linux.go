@@ -373,50 +373,67 @@ func protect(units []string) {
 
 // --- soft-reboot ---
 //
-// Trigger soft-reboot then BLOCK until the pivot is confirmed complete.
+// Trigger soft-reboot then BLOCK until the system is actually usable.
 // systemctl soft-reboot is async — it queues the operation and returns
-// immediately. If we exit here, the shell step exits, Worker reports
-// success, and the next step's shell tries to spawn mid-pivot.
+// immediately. If we exit before the new systemd is ready, the next
+// step's shell tries to spawn mid-pivot or against a half-booted system
+// and hangs.
 //
-// Exact synchronization: systemd 254+ maintains /run/systemd/soft-reboots-count
-// which it INCREMENTS when the pivot completes. Read it before, wait for N+1.
-// This is a true pivot-done signal, not a heuristic file-write side effect.
-// Our scope has SurviveFinalKillSignal=yes so we outlive the pivot.
+// Two phases:
+//   1. Wait for /proc/1/exe to resolve into /nix/store/ — PID 1 has been
+//      re-exec'd as NixOS systemd (pivot *started*).
+//   2. Wait for systemctl is-system-running to return "running" or
+//      "degraded" — NixOS systemd has reached a stable boot state (pivot
+//      *complete*, system is answering requests, services spawnable).
+//
+// Each systemctl call wrapped in timeout so an unresponsive systemd
+// doesn't block the loop — we retry. The outer caller bounds total time.
 
 func softReboot(newRoot string) error {
 	syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, "")
 	os.Remove("/run/nextroot")
 	os.Symlink(newRoot, "/run/nextroot")
 
-	before := readSoftRebootCount()
-	trace("reboot", "soft-reboots-count before=%d; triggering", before)
+	trace("reboot", "triggering soft-reboot")
 	if err := exec.Command("systemctl", "soft-reboot").Run(); err != nil {
 		return fmt.Errorf("systemctl soft-reboot: %w", err)
 	}
 
-	// Wait for the counter to increment. Condition-based, bounded by caller timeout.
+	// Phase 1: wait for PID 1 to be re-exec'd into NixOS systemd.
+	trace("reboot", "phase 1: waiting for /proc/1/exe inside /nix/store/")
 	for i := 0; ; i++ {
 		time.Sleep(500 * time.Millisecond)
-		now := readSoftRebootCount()
-		if now > before {
-			trace("reboot", "pivot complete: count %d → %d (poll #%d)", before, now, i)
-			return nil
+		exe, _ := os.Readlink("/proc/1/exe")
+		if strings.HasPrefix(exe, "/nix/store/") {
+			trace("reboot", "phase 1 done after %d polls: /proc/1/exe=%s", i, exe)
+			break
 		}
 		if i%20 == 0 {
-			pid1, _ := os.ReadFile("/proc/1/comm")
-			trace("reboot", "poll #%d: count=%d pid1=%s", i, now,
-				strings.TrimSpace(string(pid1)))
+			trace("reboot", "phase 1 poll #%d: /proc/1/exe=%s", i, exe)
 		}
 	}
-}
 
-func readSoftRebootCount() int {
-	data, err := os.ReadFile("/run/systemd/soft-reboots-count")
-	if err != nil {
-		return 0 // file absent before first soft-reboot
+	// Phase 2: wait for systemd to report running. "degraded" means at least
+	// one unit failed — don't paper over it; if the user's NixOS config has
+	// a service that can't start, surface that as a failure.
+	trace("reboot", "phase 2: waiting for systemctl is-system-running = running")
+	for i := 0; ; i++ {
+		time.Sleep(500 * time.Millisecond)
+		out, _ := exec.Command("timeout", "5", "systemctl", "is-system-running").CombinedOutput()
+		state := strings.TrimSpace(string(out))
+		if state == "running" {
+			trace("reboot", "phase 2 done after %d polls: state=running", i)
+			return nil
+		}
+		if state == "degraded" {
+			failed, _ := exec.Command("timeout", "5", "systemctl", "--failed", "--no-pager").CombinedOutput()
+			trace("reboot", "state=degraded — failed units follow:\n%s", string(failed))
+			return fmt.Errorf("pivoted system is degraded (one or more units failed to start)")
+		}
+		if i%10 == 0 {
+			trace("reboot", "phase 2 poll #%d: state=%q", i, state)
+		}
 	}
-	n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-	return n
 }
 
 // --- mountinfo helper (used by main.go) ---

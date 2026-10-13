@@ -3,14 +3,17 @@
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
-  # R2 cache config lives in CI's nix.conf (via install-nix-action
-  # extra_nix_config) rather than flake nixConfig, because flake nixConfig
-  # is untrusted-by-default and triggers "ignoring untrusted flake
-  # configuration setting" warnings. Local users who want the cache can
-  # add it to their own ~/.config/nix/nix.conf.
-  #
-  # Pub key: nixos-symbiote-2:04hzKpsfZ75z6MW8kpALD2gfLuCdnP5fbGdyjHNbsCM=
-  # Substituter: s3://nixos-symbiote?endpoint=https://e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto
+  # Project binary cache on Cloudflare R2 (bucket: nixos-symbiote).
+  # Local nix users get it automatically after accepting the flake config
+  # prompt; CI passes --accept-flake-config to use it non-interactively.
+  nixConfig = {
+    extra-substituters = [
+      "s3://nixos-symbiote?endpoint=https://e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto"
+    ];
+    extra-trusted-public-keys = [
+      "nixos-symbiote-2:04hzKpsfZ75z6MW8kpALD2gfLuCdnP5fbGdyjHNbsCM="
+    ];
+  };
 
   outputs = { self, nixpkgs }:
     let
