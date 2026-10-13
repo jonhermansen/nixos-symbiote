@@ -50,6 +50,16 @@ in
     networking.useDHCP = lib.mkDefault true;
     networking.nameservers = lib.mkDefault dnsServerList;
 
+    # Serial console on ttyS0 (x86) + ttyAMA0 (aarch64 virt) + hvc0 (riscv virt).
+    # When the activator hangs mid-pivot we attach to the serial socket on the
+    # host and see raw kernel + systemd + getty output — no SSH, no network, no
+    # D-Bus required. Autologin keeps us from needing a password.
+    boot.kernelParams = [ "console=ttyS0,115200" "console=ttyAMA0,115200" "console=hvc0" ];
+    systemd.services."serial-getty@ttyS0".enable = lib.mkDefault true;
+    systemd.services."serial-getty@ttyAMA0".enable = lib.mkDefault true;
+    systemd.services."serial-getty@hvc0".enable = lib.mkDefault true;
+    services.getty.autologinUser = lib.mkDefault username;
+
     users.users.${username} = lib.mkDefault {
       isNormalUser = true;
       home = userHome;

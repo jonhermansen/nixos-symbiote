@@ -83,11 +83,13 @@
           mkisofs -output "$WORK/seed.iso" -volid cidata -joliet -rock \
             "$WORK/user-data" "$WORK/meta-data" 2>/dev/null
           FW="$(dirname "$(command -v qemu-system-aarch64)")/../share/qemu/edk2-aarch64-code.fd"
-          echo "SSH: ssh -p 2222 -o StrictHostKeyChecking=no -i $WORK/id_ed25519 ubuntu@localhost"
+          echo "SSH:     ssh -p 2222 -o StrictHostKeyChecking=no -i $WORK/id_ed25519 ubuntu@localhost"
+          echo "Monitor: socat STDIO UNIX-CONNECT:$WORK/vm.monitor"
+          echo "Serial:  socat STDIO UNIX-CONNECT:$WORK/vm.serial  (Ctrl-O to detach)"
           echo "Booting..."
-          # QEMU monitor exposed on unix socket for live inspection:
-          # socat - UNIX-CONNECT:$WORK/vm.monitor
-          # (info status, info cpus, inject keys, savevm, screendump, etc.)
+          # Serial console goes to a unix socket (vm.serial) so we can attach
+          # with socat and see kernel + getty output even after SSH dies —
+          # critical for debugging post-pivot hangs where sshd isn't up.
           exec qemu-system-aarch64 \
             -M virt -accel hvf -cpu host \
             -m "''${SYMBIOTE_VM_MEM:-4G}" -smp "''${SYMBIOTE_VM_SMP:-4}" \
@@ -97,7 +99,8 @@
             -device virtio-net-pci,netdev=net0 \
             -netdev user,id=net0,hostfwd=tcp::2222-:22 \
             -monitor "unix:$WORK/vm.monitor,server,nowait" \
-            -nographic
+            -serial "unix:$WORK/vm.serial,server,nowait" \
+            -display none
         '';
       };
 

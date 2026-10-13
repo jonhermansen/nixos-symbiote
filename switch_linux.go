@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -51,7 +52,7 @@ func switchSystem(nixBin, system string) error {
 	// This is more robust than drop-ins alone — the kernel cgroup is what
 	// soft-reboot's isolate uses, not systemd's bookkeeping. See migrateRunner.
 	migrateRunnerToOurScope()
-	return softReboot(newRoot)
+	return softReboot(newRoot, system)
 }
 
 // migrateRunnerToOurScope writes our ancestor chain + GH runner PIDs into
@@ -302,6 +303,30 @@ func constructRoot(system string) string {
 	}
 	syscall.Mount("tmpfs", filepath.Join(newRoot, "run"), "tmpfs", 0, "")
 
+	// systemd's switch_root() iterates a transfer_table (src/shared/switch-root.c)
+	// and for each entry calls chase(path, new_root, CHASE_PREFIX_ROOT) WITHOUT
+	// CHASE_NONEXISTENT — meaning every path the host has MUST already exist
+	// inside new_root or chase returns -ENOENT and switch_root fails. On
+	// failure, systemd silently falls back to re-execing itself at the OLD
+	// binary path (main.c: "Failed to switch root, trying to continue") and
+	// the pivot never happens — /proc/1/exe stays unchanged.
+	//
+	// For soft-reboot (SWITCH_ROOT_RECURSIVE_RUN not set), transfer_table is:
+	//   /dev, /sys, /proc, /run,
+	//   /run/credentials/@system, /run/credentials/@encrypted, /run/host.
+	//
+	// GHA runners inject per-job credentials into /run/credentials/@system;
+	// bare Ubuntu usually has none. That's why pivot works locally but hangs
+	// on GHA. Pre-create empty stubs so chase() succeeds; systemd will then
+	// bind-mount the host paths onto them non-destructively.
+	for _, p := range []string{
+		"run/credentials/@system",
+		"run/credentials/@encrypted",
+		"run/host",
+	} {
+		os.MkdirAll(filepath.Join(newRoot, p), 0755)
+	}
+
 	// Symlinks for systemd + systemd-executor (point into bind-mounted /nix).
 	systemdLib := filepath.Join(system, "systemd/lib/systemd")
 	realSystemd, err := filepath.EvalSymlinks(filepath.Join(systemdLib, "systemd"))
@@ -389,10 +414,25 @@ func protect(units []string) {
 // Each systemctl call wrapped in timeout so an unresponsive systemd
 // doesn't block the loop — we retry. The outer caller bounds total time.
 
-func softReboot(newRoot string) error {
+func softReboot(newRoot, system string) error {
 	syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, "")
 	os.Remove("/run/nextroot")
 	os.Symlink(newRoot, "/run/nextroot")
+
+	// Confirm which switch_root transfer_table paths exist on the host —
+	// these are the ones that must be present inside newRoot to prevent the
+	// silent pivot-failure described in constructRoot's long comment.
+	for _, p := range []string{
+		"/run/credentials/@system",
+		"/run/credentials/@encrypted",
+		"/run/host",
+	} {
+		if _, err := os.Lstat(p); err == nil {
+			trace("reboot", "host has %s (switch_root will transfer it; newRoot stub required)", p)
+		} else {
+			trace("reboot", "host lacks %s (switch_root will skip)", p)
+		}
+	}
 
 	trace("reboot", "triggering soft-reboot")
 	if err := exec.Command("systemctl", "soft-reboot").Run(); err != nil {
@@ -400,12 +440,20 @@ func softReboot(newRoot string) error {
 	}
 
 	// Phase 1: wait for PID 1 to be re-exec'd into NixOS systemd.
+	// /proc/1/exe will become a path like
+	//   /nix/store/<hash>-systemd-<ver>/lib/systemd/systemd
+	// which gives us the EXACT systemd package running as init. We use its
+	// matching bin/systemctl in phase 2 — this is the only correct choice:
+	// any other systemctl in the store might speak a different protocol
+	// version to the running systemd.
 	trace("reboot", "phase 1: waiting for /proc/1/exe inside /nix/store/")
+	var pid1Exe string
 	for i := 0; ; i++ {
 		time.Sleep(500 * time.Millisecond)
 		exe, _ := os.Readlink("/proc/1/exe")
 		if strings.HasPrefix(exe, "/nix/store/") {
 			trace("reboot", "phase 1 done after %d polls: /proc/1/exe=%s", i, exe)
+			pid1Exe = exe
 			break
 		}
 		if i%20 == 0 {
@@ -413,27 +461,124 @@ func softReboot(newRoot string) error {
 		}
 	}
 
-	// Phase 2: wait for systemd to report running. "degraded" means at least
-	// one unit failed — don't paper over it; if the user's NixOS config has
-	// a service that can't start, surface that as a failure.
+	// Derive the matching systemctl from the systemd package root. systemd's
+	// store layout is pkg/{bin/systemctl, lib/systemd/systemd, ...} — strip
+	// the "/lib/systemd/systemd" tail to recover pkg, then append bin/systemctl.
+	systemdPkg := strings.TrimSuffix(pid1Exe, "/lib/systemd/systemd")
+	if systemdPkg == pid1Exe {
+		return fmt.Errorf("unrecognized /proc/1/exe layout: %s (expected .../lib/systemd/systemd)", pid1Exe)
+	}
+	systemctl := filepath.Join(systemdPkg, "bin/systemctl")
+	if _, err := os.Stat(systemctl); err != nil {
+		return fmt.Errorf("expected systemctl at %s: %w", systemctl, err)
+	}
+	trace("reboot", "using systemctl matched to running init: %s", systemctl)
+
+	// Phase 2: wait for systemd to report running. Use context.WithTimeout
+	// (no external `timeout` binary dependency) so each poll bounds itself.
+	// "degraded" means at least one unit failed — don't paper over it on
+	// first sighting, but DO give one reset-failed retry first: services
+	// whose OLD-system PID was SIGKILL'd by soft-reboot's final kill
+	// phase carry across pivot as "failed (signal)" via systemd's
+	// in-memory serialized unit state, even though they're socket-
+	// activated or Restart=on-failure. reset-failed clears those stale
+	// failures so dbus.socket (etc.) can spawn a fresh instance on the
+	// next client connection, and is-system-running then returns running.
 	trace("reboot", "phase 2: waiting for systemctl is-system-running = running")
+	triedResetFailed := false
 	for i := 0; ; i++ {
 		time.Sleep(500 * time.Millisecond)
-		out, _ := exec.Command("timeout", "5", "systemctl", "is-system-running").CombinedOutput()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, systemctl, "is-system-running")
+		out, err := cmd.CombinedOutput()
+		cancel()
 		state := strings.TrimSpace(string(out))
+		exit := cmd.ProcessState.ExitCode()
 		if state == "running" {
 			trace("reboot", "phase 2 done after %d polls: state=running", i)
 			return nil
 		}
+		if state == "degraded" && !triedResetFailed {
+			triedResetFailed = true
+			ctxR, cancelR := context.WithTimeout(context.Background(), 10*time.Second)
+			rfOut, rfErr := exec.CommandContext(ctxR, systemctl, "reset-failed").CombinedOutput()
+			cancelR()
+			trace("reboot", "degraded at poll #%d — ran reset-failed (err=%v out=%q); will retry", i, rfErr, strings.TrimSpace(string(rfOut)))
+			continue
+		}
 		if state == "degraded" {
-			failed, _ := exec.Command("timeout", "5", "systemctl", "--failed", "--no-pager").CombinedOutput()
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+			failed, _ := exec.CommandContext(ctx2, systemctl, "list-units", "--failed", "--no-legend", "--no-pager", "--plain").CombinedOutput()
+			cancel2()
 			trace("reboot", "state=degraded — failed units follow:\n%s", string(failed))
+			// For each failed unit, dump status + last 50 journal lines so we
+			// don't have to re-run just to see the error.
+			for _, line := range strings.Split(string(failed), "\n") {
+				unit := strings.TrimSpace(strings.SplitN(strings.TrimPrefix(strings.TrimSpace(line), "●"), " ", 2)[0])
+				if unit == "" || !strings.Contains(unit, ".") {
+					continue
+				}
+				ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
+				status, _ := exec.CommandContext(ctx3, systemctl, "status", unit, "--no-pager", "-l", "-n", "50").CombinedOutput()
+				cancel3()
+				trace("reboot", "status %s:\n%s", unit, string(status))
+				journalctl := filepath.Join(systemdPkg, "bin/journalctl")
+				if _, err := os.Stat(journalctl); err == nil {
+					ctx4, cancel4 := context.WithTimeout(context.Background(), 5*time.Second)
+					jlog, _ := exec.CommandContext(ctx4, journalctl, "-u", unit, "--no-pager", "-n", "50", "-b").CombinedOutput()
+					cancel4()
+					trace("reboot", "journal %s:\n%s", unit, string(jlog))
+				}
+			}
 			return fmt.Errorf("pivoted system is degraded (one or more units failed to start)")
 		}
 		if i%10 == 0 {
-			trace("reboot", "phase 2 poll #%d: state=%q", i, state)
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			trace("reboot", "phase 2 poll #%d: state=%q exit=%d err=%q", i, state, exit, errStr)
+		}
+		if i > 0 && i%60 == 0 {
+			dumpStuckState(i)
 		}
 	}
+}
+
+// dumpStuckState writes diagnostics useful when phase 2 is hung — reads
+// static /proc and /run files that cannot block on D-Bus.
+func dumpStuckState(poll int) {
+	trace("reboot", "===== stuck diagnostics (poll #%d) =====", poll)
+	exe, _ := os.Readlink("/proc/1/exe")
+	comm, _ := os.ReadFile("/proc/1/comm")
+	trace("reboot", "pid1: exe=%s comm=%s", exe, strings.TrimSpace(string(comm)))
+	for _, p := range []string{
+		"/run/systemd/system",
+		"/run/systemd/private",
+		"/run/dbus/system_bus_socket",
+		"/run/current-system",
+		"/etc/os-release",
+	} {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			trace("reboot", "  %s: %v", p, err)
+			continue
+		}
+		trace("reboot", "  %s: mode=%v", p, fi.Mode())
+	}
+	// What is pid 1 blocked on? /proc/1/wchan is a kernel symbol.
+	wchan, _ := os.ReadFile("/proc/1/wchan")
+	trace("reboot", "pid1 wchan=%s", strings.TrimSpace(string(wchan)))
+	// Our own context.
+	selfExe, _ := os.Readlink("/proc/self/exe")
+	trace("reboot", "self: exe=%s pid=%d", selfExe, os.Getpid())
+	// Try one more thing WITHOUT systemctl — read systemd notify socket entries.
+	if entries, err := os.ReadDir("/run/systemd/units"); err == nil {
+		trace("reboot", "/run/systemd/units has %d entries", len(entries))
+	} else {
+		trace("reboot", "/run/systemd/units: %v", err)
+	}
+	trace("reboot", "===== end diagnostics =====")
 }
 
 // --- mountinfo helper (used by main.go) ---
