@@ -135,6 +135,43 @@ jobs:
           aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/baseline.tgz \
             "s3://nixos-symbiote/diag/${{ github.run_id }}-${{ matrix.arch }}-baseline.tgz"
 
+      - name: Start protected R2 uploader (survives pivot)
+        # The soft-reboot freezes Runner.Worker, so the activator step's
+        # trap/timeout never fire and job-cancel purges logs. This unit is
+        # systemd-run with SurviveFinalKillSignal, so it keeps running
+        # across the pivot attempt and streams the live trace to R2 every
+        # few seconds. Because the pivot currently FAILS on GHA (stays
+        # Ubuntu), /usr/bin/aws and R2 creds stay reachable throughout.
+        # Credentials are passed via --setenv (visible in ps on our own
+        # ephemeral runner only).
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          sudo systemd-run --unit=symbiote-uploader \
+            --property=DefaultDependencies=no \
+            --property=IgnoreOnIsolate=yes \
+            --property=SurviveFinalKillSignal=yes \
+            --setenv=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+            --setenv=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+            --setenv=AWS_DEFAULT_REGION=auto \
+            --setenv=AWS_EC2_METADATA_DISABLED=true \
+            --setenv=R2_ENDPOINT="$R2_ENDPOINT" \
+            --setenv=KEY="${{ github.run_id }}-${{ matrix.arch }}" \
+            bash -c '
+              n=0
+              while true; do
+                n=$((n+1))
+                tar czf /tmp/live.tgz -C /var/log symbiote 2>/dev/null || true
+                aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/live.tgz \
+                  "s3://nixos-symbiote/diag/${KEY}-live.tgz" >/dev/null 2>&1 \
+                  && echo "uploader: push #$n ok $(date -u +%H:%M:%S)" >> /var/log/symbiote/uploader.log \
+                  || echo "uploader: push #$n FAILED $(date -u +%H:%M:%S)" >> /var/log/symbiote/uploader.log
+                sleep 5
+              done
+            '
+
       - name: Invoke activator (triggers soft-reboot)
         timeout-minutes: 4
         env:
