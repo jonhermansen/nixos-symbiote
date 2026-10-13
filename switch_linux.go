@@ -373,12 +373,14 @@ func protect(units []string) {
 
 // --- soft-reboot ---
 //
-// Fire immediately. We've migrated our ancestor chain (shell, sudo, Worker,
-// Listener) into our protected scope's cgroup, so they survive pivot_root.
-// Shell exits normally after our activator exits, Worker reads the exit
-// code and reports step completion, Listener's TCP long-poll briefly
-// drops during the network tear-down and reconnects per its built-in
-// retry logic (15-30s random backoff — see Runner.Listener/MessageListener.cs).
+// Trigger soft-reboot, then BLOCK until the pivot is actually complete.
+// Our scope has SurviveFinalKillSignal=yes so we outlive the pivot and can
+// observe its completion. If we returned immediately after queueing, the
+// shell step would exit and the next step's shell would try to spawn mid-
+// pivot — bash exec fails in that transitional state.
+//
+// Condition: /etc/os-release reports ID=nixos. No magic timeout; the
+// GHA step-level timeout bounds us if the pivot never lands.
 
 func softReboot(newRoot string) error {
 	syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, "")
@@ -386,7 +388,26 @@ func softReboot(newRoot string) error {
 	os.Symlink(newRoot, "/run/nextroot")
 
 	trace("reboot", "triggering soft-reboot into %s", newRoot)
-	return exec.Command("systemctl", "soft-reboot").Run()
+	if err := exec.Command("systemctl", "soft-reboot").Run(); err != nil {
+		return fmt.Errorf("systemctl soft-reboot: %w", err)
+	}
+
+	trace("reboot", "queued; waiting for pivot (polling /etc/os-release)")
+	for i := 0; ; i++ {
+		time.Sleep(500 * time.Millisecond)
+		data, _ := os.ReadFile("/etc/os-release")
+		if strings.Contains(string(data), "ID=nixos") {
+			trace("reboot", "pivot complete after %d polls — now NixOS", i)
+			return nil
+		}
+		// Trace every 20 ticks (~10s) so we see progress.
+		if i%20 == 0 {
+			pid1, _ := os.ReadFile("/proc/1/comm")
+			trace("reboot", "tick %d: pid1=%s os=%s", i,
+				strings.TrimSpace(string(pid1)),
+				string(data))
+		}
+	}
 }
 
 // --- mountinfo helper (used by main.go) ---
