@@ -25,7 +25,10 @@ jobs:
           #   arch: riscv64
           #   flake-attr: linux-riscv64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    # Short overall budget — we want to force fast failure so GH doesn't
+    # cancel us at the 25-min mark and purge the live step log. Each sub-
+    # step has its own timeout; this is the backstop.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -110,13 +113,32 @@ jobs:
           rm -f /tmp/cache-priv.key
 
       - name: Invoke activator (triggers soft-reboot)
-        timeout-minutes: 8
+        timeout-minutes: 4
         run: |
-          # Live-tail trace+watchdog to stdout — the only data recoverable
-          # if the shell dies before status report.
-          sudo tail -F -n 0 /var/log/symbiote/trace.log /var/log/symbiote/watchdog.log &
+          # Live-tail trace + watchdog + journal so step stdout captures
+          # everything in real time. GHA job-timeout cancellations purge
+          # artifacts and job logs, so this live stream is often the only
+          # data we get out on a hang.
+          sudo tail -F -n 0 \
+            /var/log/symbiote/trace.log \
+            /var/log/symbiote/watchdog.log \
+            /var/log/symbiote/journal.log &
           TAIL_PID=$!
-          trap "sudo kill $TAIL_PID 2>/dev/null || true" EXIT
+          # On ANY exit (incl. SIGTERM from step timeout), dump everything
+          # we have one more time via direct cat so the step log has a
+          # non-tail copy at the end. Also give the watchdog a moment to
+          # flush its final line.
+          trap '
+            echo "=== trap fired exit=$? ==="
+            sleep 1
+            sudo kill '"$TAIL_PID"' 2>/dev/null || true
+            echo "=== FINAL trace.log ==="
+            sudo cat /var/log/symbiote/trace.log 2>/dev/null || echo "(no trace)"
+            echo "=== FINAL watchdog.log ==="
+            sudo cat /var/log/symbiote/watchdog.log 2>/dev/null || echo "(no watchdog)"
+            echo "=== FINAL journal.log (last 400 lines) ==="
+            sudo tail -400 /var/log/symbiote/journal.log 2>/dev/null || echo "(no journal)"
+          ' EXIT
           echo "=== invoking activator ==="
           sudo ./nixos-symbiote --config test/configuration-minimal.nix
           echo "=== activator returned exit=$? ==="
