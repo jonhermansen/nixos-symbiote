@@ -1,0 +1,43 @@
+name: Fetch Diagnostics from R2
+
+# Pulls the diag tarballs our test workflow streams to R2 and prints them
+# to the step log. This job does NO soft-reboot, so its log is never
+# purged — the reliable way to read back pivot traces captured by the
+# surviving uploader.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/fetch-diag.yaml'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: "true"
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+    steps:
+      - name: List and dump all diag objects
+        run: |
+          aws --endpoint-url "$R2_ENDPOINT" s3 ls "s3://nixos-symbiote/diag/" --recursive
+          mkdir -p /tmp/diag
+          aws --endpoint-url "$R2_ENDPOINT" s3 cp "s3://nixos-symbiote/diag/" /tmp/diag/ --recursive
+          echo "=== downloaded ==="
+          ls -la /tmp/diag
+          for t in /tmp/diag/*.tgz; do
+            echo "############################################################"
+            echo "### $t"
+            echo "############################################################"
+            d="/tmp/x-$(basename "$t")"
+            mkdir -p "$d"
+            tar xzf "$t" -C "$d" 2>/dev/null || { echo "(extract failed)"; continue; }
+            find "$d" -type f | sort | while read -r f; do
+              echo "----- $f -----"
+              cat "$f"
+              echo
+            done
+          done
