@@ -434,6 +434,13 @@ func softReboot(newRoot, system string) error {
 		}
 	}
 
+	// Pre-pivot sanity dump — if switch_root fails, we need to know everything
+	// that could have caused it. systemd's path_is_os_tree("/run/nextroot")
+	// is the first gate (main.c:1829); it requires {/etc,/usr/lib}/os-release
+	// inside newRoot. Dump that check explicitly so a missing os-release
+	// shows up in trace immediately instead of needing a journal grep.
+	dumpPrePivot(newRoot)
+
 	trace("reboot", "triggering soft-reboot")
 	if err := exec.Command("systemctl", "soft-reboot").Run(); err != nil {
 		return fmt.Errorf("systemctl soft-reboot: %w", err)
@@ -446,8 +453,15 @@ func softReboot(newRoot, system string) error {
 	// matching bin/systemctl in phase 2 — this is the only correct choice:
 	// any other systemctl in the store might speak a different protocol
 	// version to the running systemd.
+	//
+	// Hard cap at 180 polls (90s). If pivot hasn't happened by then it never
+	// will — fail fast with the journal grep so we have the data in trace.
+	// systemd's "Failed to switch root" / "/run/nextroot is not a valid OS
+	// tree" errors go to the journal via its own log facility, which our
+	// journal-logger watchdog captures to /var/log/symbiote/journal.log.
 	trace("reboot", "phase 1: waiting for /proc/1/exe inside /nix/store/")
 	var pid1Exe string
+	const phase1Deadline = 180
 	for i := 0; ; i++ {
 		time.Sleep(500 * time.Millisecond)
 		exe, _ := os.Readlink("/proc/1/exe")
@@ -458,6 +472,11 @@ func softReboot(newRoot, system string) error {
 		}
 		if i%20 == 0 {
 			trace("reboot", "phase 1 poll #%d: /proc/1/exe=%s", i, exe)
+			dumpJournalGrep(i)
+		}
+		if i >= phase1Deadline {
+			dumpJournalGrep(i)
+			return fmt.Errorf("phase 1 timed out after %d polls — PID 1 never pivoted into /nix/store (/proc/1/exe=%s); check trace above for systemd's switch_root error", i, exe)
 		}
 	}
 
@@ -543,6 +562,108 @@ func softReboot(newRoot, system string) error {
 			dumpStuckState(i)
 		}
 	}
+}
+
+// dumpPrePivot writes everything we might need to understand a pivot
+// failure, taken from the HOST view just before soft-reboot fires. The
+// gates systemd will apply (main.c:1829 path_is_os_tree + switch_root
+// transfer_table) are all directly observable here — if a required path
+// is missing from newRoot now, systemd WILL fail silently later.
+func dumpPrePivot(newRoot string) {
+	trace("prepivot", "===== pre-soft-reboot sanity dump =====")
+	nxLink, _ := os.Readlink("/run/nextroot")
+	trace("prepivot", "/run/nextroot → %s (want: %s)", nxLink, newRoot)
+	// path_is_os_tree gate — newRoot must have /etc/os-release OR
+	// /usr/lib/os-release reachable through its real path.
+	for _, p := range []string{"etc/os-release", "usr/lib/os-release"} {
+		full := filepath.Join(newRoot, p)
+		if fi, err := os.Lstat(full); err == nil {
+			trace("prepivot", "  %s: present (mode=%v size=%d)", p, fi.Mode(), fi.Size())
+		} else {
+			trace("prepivot", "  %s: %v", p, err)
+		}
+	}
+	// Boot gates for the re-exec after pivot — these are what systemd's
+	// hardcoded SYSTEMD_BINARY_PATH resolves to inside newRoot.
+	for _, p := range []string{"usr/lib/systemd/systemd", "usr/lib/systemd/systemd-executor", "sbin/init"} {
+		full := filepath.Join(newRoot, p)
+		if tgt, err := os.Readlink(full); err == nil {
+			if _, serr := os.Stat(full); serr == nil {
+				trace("prepivot", "  %s → %s (reachable)", p, tgt)
+			} else {
+				trace("prepivot", "  %s → %s (DANGLING: %v)", p, tgt, serr)
+			}
+		} else if fi, err := os.Lstat(full); err == nil {
+			trace("prepivot", "  %s: regular, mode=%v", p, fi.Mode())
+		} else {
+			trace("prepivot", "  %s: MISSING (%v)", p, err)
+		}
+	}
+	// Mount state of key paths — systemd's switch_root path_is_mount_point
+	// checks drive whether entries are skipped or bind-mounted.
+	trace("prepivot", "----- mountinfo for key paths -----")
+	mi, err := os.ReadFile("/proc/self/mountinfo")
+	if err == nil {
+		for _, line := range strings.Split(string(mi), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 5 {
+				continue
+			}
+			mp := fields[4]
+			if mp == "/" || mp == "/nix" || mp == "/run" || mp == "/run/nextroot" || strings.HasPrefix(mp, newRoot) {
+				trace("prepivot", "  mount: %s", line)
+			}
+		}
+	}
+	trace("prepivot", "----- newRoot top-level -----")
+	if entries, err := os.ReadDir(newRoot); err == nil {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		trace("prepivot", "  %v", names)
+	}
+	trace("prepivot", "===== end pre-pivot dump =====")
+}
+
+// dumpJournalGrep reads the journal-logger output file (populated by
+// our systemd-run'd watchdog) and surfaces lines that would explain a
+// pivot failure. systemd logs "Failed to switch root" / "not a valid
+// OS tree" / "nextroot" through its normal log channel — journal
+// receives them, our file receives journal, we grep.
+func dumpJournalGrep(poll int) {
+	const journalPath = "/var/log/symbiote/journal.log"
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		trace("reboot", "journal-grep poll #%d: cannot read %s: %v", poll, journalPath, err)
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	// Last ~200 lines; grep for pivot-relevant tokens.
+	start := len(lines) - 200
+	if start < 0 {
+		start = 0
+	}
+	keep := []string{}
+	for _, l := range lines[start:] {
+		low := strings.ToLower(l)
+		if strings.Contains(low, "nextroot") ||
+			strings.Contains(low, "switch root") ||
+			strings.Contains(low, "switch-root") ||
+			strings.Contains(low, "soft-reboot") ||
+			strings.Contains(low, "soft reboot") ||
+			strings.Contains(low, "pivot") ||
+			strings.Contains(low, "failed to execute") ||
+			strings.Contains(low, "os tree") ||
+			strings.Contains(low, "spawn executor") {
+			keep = append(keep, l)
+		}
+	}
+	if len(keep) == 0 {
+		trace("reboot", "journal-grep poll #%d: no pivot-related messages yet", poll)
+		return
+	}
+	trace("reboot", "journal-grep poll #%d: %d matching line(s):\n  %s", poll, len(keep), strings.Join(keep, "\n  "))
 }
 
 // dumpStuckState writes diagnostics useful when phase 2 is hung — reads

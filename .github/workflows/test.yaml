@@ -18,9 +18,12 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
             flake-attr: linux-arm64
-          - runner: ubuntu-24.04-riscv
-            arch: riscv64
-            flake-attr: linux-riscv64
+          # riscv64 disabled: RISE RISC-V Builders runners are frequently
+          # unavailable and leave the matrix lane in "queued" indefinitely.
+          # Binary is still built for release via linux-riscv64 flake attr.
+          # - runner: ubuntu-24.04-riscv
+          #   arch: riscv64
+          #   flake-attr: linux-riscv64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
