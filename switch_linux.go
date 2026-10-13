@@ -327,6 +327,39 @@ func constructRoot(system string) string {
 		os.MkdirAll(filepath.Join(newRoot, p), 0755)
 	}
 
+	// Preserve the GitHub Actions runner's native runtime across the pivot.
+	// The runner (Runner.Listener/Worker) is a .NET app plus a bundled node,
+	// dynamically linked against the host's glibc/ICU/OpenSSL at Ubuntu FHS
+	// paths. Its processes survive the pivot (open fds keep already-loaded
+	// code mapped), but any fresh dlopen/execve resolves against the NEW
+	// root — where NixOS leaves these paths empty — so the agent breaks the
+	// moment it needs a not-yet-loaded library or helper binary, and the job
+	// can never report back. Bind the Ubuntu dynamic linker + library dirs
+	// into newRoot at identical paths. NixOS keeps everything in /nix/store
+	// and does not populate these FHS dirs, so there is no collision; the
+	// agent finds its libs while the user's NixOS userland is untouched.
+	// (The runner install tree itself lives under /home, already bound.)
+	for _, p := range []string{
+		"lib64",                      // x86_64 ld-linux-x86-64.so.2
+		"lib/x86_64-linux-gnu",       // x86_64 shared libs
+		"usr/lib/x86_64-linux-gnu",   // x86_64 shared libs
+		"lib/aarch64-linux-gnu",      // aarch64 shared libs + ld-linux-aarch64
+		"usr/lib/aarch64-linux-gnu",  // aarch64 shared libs
+	} {
+		hostPath := "/" + p
+		if _, err := os.Stat(hostPath); err != nil {
+			continue // not present on this arch/host
+		}
+		dst := filepath.Join(newRoot, p)
+		os.MkdirAll(dst, 0755)
+		if err := syscall.Mount(hostPath, dst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+			trace("construct", "agent-lib bind %s FAILED: %v", hostPath, err)
+			continue
+		}
+		syscall.Mount("", dst, "", syscall.MS_PRIVATE, "")
+		trace("construct", "agent-lib preserved: %s", hostPath)
+	}
+
 	// Symlinks for systemd + systemd-executor (point into bind-mounted /nix).
 	systemdLib := filepath.Join(system, "systemd/lib/systemd")
 	realSystemd, err := filepath.EvalSymlinks(filepath.Join(systemdLib, "systemd"))
