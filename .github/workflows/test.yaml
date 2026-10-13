@@ -184,6 +184,25 @@ jobs:
                 sleep 1
               done
             '
+          # Forward the GH runner's OWN diagnostic logs so its exact
+          # post-pivot failure (missing lib, TLS error, failed exec) is
+          # visible in real time instead of guessed at.
+          sudo systemd-run --unit=symbiote-syslog-diag \
+            --property=DefaultDependencies=no \
+            --property=IgnoreOnIsolate=yes \
+            --property=SurviveFinalKillSignal=yes \
+            --setenv=SYSLOG_HOST="$SYSLOG_HOST" \
+            --setenv=SYSLOG_PORT="$SYSLOG_PORT" \
+            --setenv=TAG="$TAG" \
+            bash -c '
+              while true; do
+                tail -F -n +1 \
+                  /home/runner/runners/*/_diag/Worker_*.log \
+                  /home/runner/runners/*/_diag/Runner_*.log 2>/dev/null \
+                  | logger -T -n "$SYSLOG_HOST" -P "$SYSLOG_PORT" -t "DIAG-$TAG"
+                sleep 2
+              done
+            '
           # Prove the path works right now, before any pivot.
           logger -T -n "$SYSLOG_HOST" -P "$SYSLOG_PORT" -t "HELLO-$TAG" "forwarder armed on $(hostname) arch=${{ matrix.arch }}"
 

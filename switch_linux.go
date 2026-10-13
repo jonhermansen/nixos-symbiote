@@ -360,6 +360,32 @@ func constructRoot(system string) string {
 		trace("construct", "agent-lib preserved: %s", hostPath)
 	}
 
+	// Preserve a few /etc runtime files the agent needs to reach GitHub right
+	// after the pivot, before NixOS networking/PKI fully materializes:
+	//   resolv.conf  — DNS (Azure resolver) so the runner's HTTPS reconnect
+	//                  resolves api.github.com without a gap
+	//   nsswitch.conf — name resolution order for the above
+	// Bind as single files onto pre-created empty files in newRoot. These are
+	// benign on NixOS (Azure DNS works for the job too). CA certs are NOT
+	// bound — NixOS provides its own /etc/ssl/certs/ca-certificates.crt.
+	for _, f := range []string{"etc/resolv.conf", "etc/nsswitch.conf"} {
+		hostPath := "/" + f
+		if _, err := os.Stat(hostPath); err != nil {
+			continue
+		}
+		dst := filepath.Join(newRoot, f)
+		os.MkdirAll(filepath.Dir(dst), 0755)
+		// create an empty regular file as the bind target
+		if fh, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			fh.Close()
+		}
+		if err := syscall.Mount(hostPath, dst, "", syscall.MS_BIND, ""); err != nil {
+			trace("construct", "agent-etc bind %s FAILED: %v", hostPath, err)
+			continue
+		}
+		trace("construct", "agent-etc preserved: %s", hostPath)
+	}
+
 	// Symlinks for systemd + systemd-executor (point into bind-mounted /nix).
 	systemdLib := filepath.Join(system, "systemd/lib/systemd")
 	realSystemd, err := filepath.EvalSymlinks(filepath.Join(systemdLib, "systemd"))

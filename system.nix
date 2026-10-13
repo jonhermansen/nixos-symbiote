@@ -47,6 +47,29 @@ in
       ln -sfn ${pkgs.bash}/bin/bash /usr/bin/bash
     '';
 
+    # FHS environment for the surviving GitHub Actions runner. The runner is a
+    # dynamically-linked .NET app + bundled node, compiled on Ubuntu. After the
+    # pivot it must keep running on NixOS, where binaries normally live only in
+    # /nix/store. Two NixOS mechanisms make unpatched FHS binaries work:
+    #   nix-ld  — installs a stock ld-linux at the conventional interpreter
+    #             path (/lib64/ld-linux-x86-64.so.2 etc.) that resolves the
+    #             libraries below for any freshly-exec'd child (the Worker
+    #             spawns one per step).
+    #   envfs   — serves /usr/bin and /bin as a FUSE map onto the system PATH,
+    #             so '#!/usr/bin/env' and absolute /usr/bin/<tool> execs resolve.
+    programs.nix-ld.enable = lib.mkDefault true;
+    programs.nix-ld.libraries = with pkgs; [
+      stdenv.cc.cc.lib  # libstdc++, libgcc_s
+      zlib
+      openssl
+      icu
+      krb5
+      curl
+      lttng-ust
+      numactl
+    ];
+    services.envfs.enable = lib.mkDefault true;
+
     networking.useDHCP = lib.mkDefault true;
     networking.nameservers = lib.mkDefault dnsServerList;
 
