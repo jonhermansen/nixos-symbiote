@@ -1,0 +1,42 @@
+name: Local VM Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: [self-hosted, local-vm-arm64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Pre-flight inventory
+        run: |
+          echo "=== uname ===" ; uname -a
+          echo "=== own cgroup ===" ; cat /proc/self/cgroup
+          echo "=== Runner.* processes ==="
+          pgrep -af 'Runner\.' || true
+          echo "=== systemd version ===" ; systemctl --version | head -1
+
+      - name: Prepare trace dir
+        run: sudo mkdir -p /var/log/symbiote && sudo chown $USER /var/log/symbiote
+
+      - name: Install Nix
+        run: |
+          command -v nix >/dev/null && { echo "nix already installed"; exit 0; }
+          curl -sSL -o /tmp/nix-installer.sh https://nixos.org/nix/install
+          # TODO: sha256 verify
+          sh /tmp/nix-installer.sh --daemon --yes
+          . /etc/profile.d/nix.sh
+
+      - name: Build + invoke activator
+        timeout-minutes: 8
+        run: |
+          . /etc/profile.d/nix.sh
+          nix build --accept-flake-config .#linux-arm64
+          cp result/bin/nixos-symbiote ./nixos-symbiote
+          ./nixos-symbiote --version
+          sudo tail -F -n 0 /var/log/symbiote/trace.log &
+          TAIL_PID=$!
+          trap "sudo kill $TAIL_PID 2>/dev/null || true" EXIT
+          sudo ./nixos-symbiote --config test/configuration-minimal.nix
