@@ -373,41 +373,50 @@ func protect(units []string) {
 
 // --- soft-reboot ---
 //
-// Trigger soft-reboot, then BLOCK until the pivot is actually complete.
-// Our scope has SurviveFinalKillSignal=yes so we outlive the pivot and can
-// observe its completion. If we returned immediately after queueing, the
-// shell step would exit and the next step's shell would try to spawn mid-
-// pivot — bash exec fails in that transitional state.
+// Trigger soft-reboot then BLOCK until the pivot is confirmed complete.
+// systemctl soft-reboot is async — it queues the operation and returns
+// immediately. If we exit here, the shell step exits, Worker reports
+// success, and the next step's shell tries to spawn mid-pivot.
 //
-// Condition: /etc/os-release reports ID=nixos. No magic timeout; the
-// GHA step-level timeout bounds us if the pivot never lands.
+// Exact synchronization: systemd 254+ maintains /run/systemd/soft-reboots-count
+// which it INCREMENTS when the pivot completes. Read it before, wait for N+1.
+// This is a true pivot-done signal, not a heuristic file-write side effect.
+// Our scope has SurviveFinalKillSignal=yes so we outlive the pivot.
 
 func softReboot(newRoot string) error {
 	syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, "")
 	os.Remove("/run/nextroot")
 	os.Symlink(newRoot, "/run/nextroot")
 
-	trace("reboot", "triggering soft-reboot into %s", newRoot)
+	before := readSoftRebootCount()
+	trace("reboot", "soft-reboots-count before=%d; triggering", before)
 	if err := exec.Command("systemctl", "soft-reboot").Run(); err != nil {
 		return fmt.Errorf("systemctl soft-reboot: %w", err)
 	}
 
-	trace("reboot", "queued; waiting for pivot (polling /etc/os-release)")
+	// Wait for the counter to increment. Condition-based, bounded by caller timeout.
 	for i := 0; ; i++ {
 		time.Sleep(500 * time.Millisecond)
-		data, _ := os.ReadFile("/etc/os-release")
-		if strings.Contains(string(data), "ID=nixos") {
-			trace("reboot", "pivot complete after %d polls — now NixOS", i)
+		now := readSoftRebootCount()
+		if now > before {
+			trace("reboot", "pivot complete: count %d → %d (poll #%d)", before, now, i)
 			return nil
 		}
-		// Trace every 20 ticks (~10s) so we see progress.
 		if i%20 == 0 {
 			pid1, _ := os.ReadFile("/proc/1/comm")
-			trace("reboot", "tick %d: pid1=%s os=%s", i,
-				strings.TrimSpace(string(pid1)),
-				string(data))
+			trace("reboot", "poll #%d: count=%d pid1=%s", i, now,
+				strings.TrimSpace(string(pid1)))
 		}
 	}
+}
+
+func readSoftRebootCount() int {
+	data, err := os.ReadFile("/run/systemd/soft-reboots-count")
+	if err != nil {
+		return 0 // file absent before first soft-reboot
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	return n
 }
 
 // --- mountinfo helper (used by main.go) ---

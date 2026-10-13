@@ -35,7 +35,17 @@ in
 
     # Tiny /bin/sh — busybox ash. Keeps the symbiote footprint minimal.
     environment.binsh = "${pkgs.busybox}/bin/sh";
-    environment.systemPackages = lib.mkBefore [ pkgs.busybox ];
+    # GitHub Actions Worker exec's /bin/bash --noprofile --norc for every
+    # step shell. NixOS doesn't put bash at /bin/bash by default — all
+    # binaries live in /nix/store. Without this, Worker's execve returns
+    # ENOENT and the whole step hangs. Create fixed-path symlinks via
+    # activation.
+    environment.systemPackages = lib.mkBefore [ pkgs.busybox pkgs.bash ];
+    system.activationScripts.binBash = ''
+      ln -sfn ${pkgs.bash}/bin/bash /bin/bash
+      mkdir -p /usr/bin
+      ln -sfn ${pkgs.bash}/bin/bash /usr/bin/bash
+    '';
 
     networking.useDHCP = lib.mkDefault true;
     networking.nameservers = lib.mkDefault dnsServerList;
