@@ -21,19 +21,19 @@ jobs:
       - name: Prepare trace dir
         run: sudo mkdir -p /var/log/symbiote && sudo chown $USER /var/log/symbiote
 
-      - name: Install Nix
+      - name: Install Nix (if missing)
         run: |
           command -v nix >/dev/null && { echo "nix already installed"; exit 0; }
           curl -sSL -o /tmp/nix-installer.sh https://nixos.org/nix/install
-          # TODO: sha256 verify
           sh /tmp/nix-installer.sh --daemon --yes
-          . /etc/profile.d/nix.sh
+          echo "experimental-features = nix-command flakes" | sudo tee -a /etc/nix/nix.conf
+          sudo systemctl restart nix-daemon
 
       - name: Build + invoke activator
         timeout-minutes: 8
         run: |
           . /etc/profile.d/nix.sh
-          nix build --accept-flake-config .#linux-arm64
+          nix --extra-experimental-features 'nix-command flakes' build --accept-flake-config .#linux-arm64
           cp result/bin/nixos-symbiote ./nixos-symbiote
           ./nixos-symbiote --version
           sudo tail -F -n 0 /var/log/symbiote/trace.log &
