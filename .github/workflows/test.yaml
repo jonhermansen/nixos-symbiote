@@ -119,13 +119,18 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_EC2_METADATA_DISABLED: "true"
+          AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
+          set -x
+          # Build the dir as the runner user first (writable), then pull in
+          # root-owned logs last so our own redirects never hit a root-owned dir.
           mkdir -p /tmp/baseline
-          sudo cp -a /var/log/symbiote/. /tmp/baseline/ 2>/dev/null || true
           systemctl --no-pager --version | head -1 > /tmp/baseline/systemd-version.txt
           sudo cat /proc/self/mountinfo > /tmp/baseline/mountinfo.txt
           echo "run_id=${{ github.run_id }} arch=${{ matrix.arch }}" > /tmp/baseline/id.txt
+          sudo cp -a /var/log/symbiote/. /tmp/baseline/ 2>/dev/null || true
+          sudo chown -R "$USER" /tmp/baseline
           tar czf /tmp/baseline.tgz -C /tmp baseline
           aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/baseline.tgz \
             "s3://nixos-symbiote/diag/${{ github.run_id }}-${{ matrix.arch }}-baseline.tgz"
@@ -137,6 +142,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           AWS_EC2_METADATA_DISABLED: "true"
+          AWS_DEFAULT_REGION: auto
           GHA_RUN_ID: ${{ github.run_id }}
           GHA_ARCH: ${{ matrix.arch }}
         run: |
