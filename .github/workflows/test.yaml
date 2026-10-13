@@ -112,8 +112,36 @@ jobs:
           nix copy --to "s3://nixos-symbiote?endpoint=${{ secrets.R2_ENDPOINT }}&region=auto" ./result
           rm -f /tmp/cache-priv.key
 
+      - name: Install awscli (for diagnostics upload)
+        run: sudo apt-get update -qq && sudo apt-get install -y awscli
+
+      - name: Baseline diagnostic upload (pre-pivot)
+        # GHA cancellations purge logs AND skip later steps, so R2 is the
+        # only reliable escape hatch for pivot-failure diagnostics.
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          mkdir -p /tmp/baseline
+          sudo cp -a /var/log/symbiote/. /tmp/baseline/ 2>/dev/null || true
+          systemctl --no-pager --version | head -1 > /tmp/baseline/systemd-version.txt
+          sudo cat /proc/self/mountinfo > /tmp/baseline/mountinfo.txt
+          echo "run_id=${{ github.run_id }} arch=${{ matrix.arch }}" > /tmp/baseline/id.txt
+          tar czf /tmp/baseline.tgz -C /tmp baseline
+          aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/baseline.tgz \
+            "s3://nixos-symbiote/diag/${{ github.run_id }}-${{ matrix.arch }}-baseline.tgz"
+
       - name: Invoke activator (triggers soft-reboot)
         timeout-minutes: 4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_EC2_METADATA_DISABLED: "true"
+          GHA_RUN_ID: ${{ github.run_id }}
+          GHA_ARCH: ${{ matrix.arch }}
         run: |
           # Live-tail trace + watchdog + journal so step stdout captures
           # everything in real time. GHA job-timeout cancellations purge
@@ -129,7 +157,8 @@ jobs:
           # non-tail copy at the end. Also give the watchdog a moment to
           # flush its final line.
           trap '
-            echo "=== trap fired exit=$? ==="
+            RC=$?
+            echo "=== trap fired exit=$RC ==="
             sleep 1
             sudo kill '"$TAIL_PID"' 2>/dev/null || true
             echo "=== FINAL trace.log ==="
@@ -138,6 +167,10 @@ jobs:
             sudo cat /var/log/symbiote/watchdog.log 2>/dev/null || echo "(no watchdog)"
             echo "=== FINAL journal.log (last 400 lines) ==="
             sudo tail -400 /var/log/symbiote/journal.log 2>/dev/null || echo "(no journal)"
+            # Upload full post-mortem to R2 so cancellation does not steal our logs.
+            sudo tar czf /tmp/postmortem.tgz -C /var/log symbiote
+            aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/postmortem.tgz \
+              "s3://nixos-symbiote/diag/${GHA_RUN_ID}-${GHA_ARCH}-postmortem.tgz"
           ' EXIT
           echo "=== invoking activator ==="
           sudo ./nixos-symbiote --config test/configuration-minimal.nix
