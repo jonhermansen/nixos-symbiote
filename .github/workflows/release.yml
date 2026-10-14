@@ -2,11 +2,15 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    # Auto-release on a VERSION bump: push a commit that changes VERSION to
+    # master, the cross-build runs (the CI gate), and if it passes the release
+    # is cut automatically with tag v<VERSION>. Pushing a v* tag still works
+    # for manual releases.
+    branches: [master]
+    paths: ['VERSION']
+    tags: ['v*']
   # Manual run = dry-run: cross-build + stage + upload artifacts, but DO NOT
-  # create a GitHub Release. Lets us debug the build/staging in isolation
-  # without cutting throwaway tags. A real release only happens on a v* tag.
+  # create a GitHub Release. Lets us debug the build/staging in isolation.
   workflow_dispatch:
 
 permissions:
@@ -47,9 +51,9 @@ jobs:
 
   publish:
     needs: build
-    # Only publish on an actual v* tag push. A manual workflow_dispatch stops
-    # after `build` (artifacts uploaded) — that's the isolated dry-run.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Publish on any push event (a v* tag, or a VERSION-bump commit to master);
+    # a manual workflow_dispatch is the dry-run and stops after `build`.
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -64,7 +68,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ls -la dist/
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
+          # Tag = the pushed tag, or v<VERSION> for a VERSION-bump push. gh
+          # release create makes the tag at this commit if it doesn't exist.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(cat VERSION)"
+          fi
+          echo "release tag: $TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — nothing to do"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --target "$GITHUB_SHA" \
             --generate-notes \
             dist/*
