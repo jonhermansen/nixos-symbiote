@@ -12,18 +12,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-26.04
+          - runner: ubuntu-24.04
             arch: x86_64
             flake-attr: linux-amd64
-          - runner: ubuntu-26.04-arm
+          - runner: ubuntu-24.04-arm
             arch: aarch64
             flake-attr: linux-arm64
-          # riscv64 disabled: RISE RISC-V Builders runners are frequently
-          # unavailable and leave the matrix lane in "queued" indefinitely.
-          # Binary is still built for release via linux-riscv64 flake attr.
-          # - runner: ubuntu-24.04-riscv
-          #   arch: riscv64
-          #   flake-attr: linux-riscv64
+          - runner: ubuntu-24.04-riscv
+            arch: riscv64
+            flake-attr: linux-riscv64
     runs-on: ${{ matrix.runner }}
     # Short overall budget — we want to force fast failure so GH doesn't
     # cancel us at the 25-min mark and purge the live step log. Each sub-
