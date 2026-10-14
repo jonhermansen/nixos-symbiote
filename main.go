@@ -60,6 +60,20 @@ func parseArgs(args []string) config {
 		case "--config", "-c":
 			i++
 			cfg.configPath, _ = filepath.Abs(args[i])
+		case "--expr", "-e":
+			// Inline NixOS module body, e.g.
+			//   --expr 'environment.systemPackages = [ pkgs.hello ];'
+			// Wrapped into a module and written to a temp file so the rest of
+			// the pipeline (nix-build system.nix --argstr configPath ...) is
+			// unchanged.
+			i++
+			f, err := os.CreateTemp("", "symbiote-inline-*.nix")
+			if err != nil {
+				log.Fatalf("inline expr temp file: %v", err)
+			}
+			fmt.Fprintf(f, "{ pkgs, lib, config, ... }: {\n%s\n}\n", args[i])
+			f.Close()
+			cfg.configPath = f.Name()
 		case "--nixpkgs":
 			i++
 			cfg.nixpkgsSrc = args[i]

@@ -47,41 +47,31 @@ in
       ln -sfn ${pkgs.bash}/bin/bash /usr/bin/bash
     '';
 
-    # FHS environment for the surviving GitHub Actions runner. The runner is a
-    # dynamically-linked .NET app + bundled node, compiled on Ubuntu. After the
-    # pivot it must keep running on NixOS, where binaries normally live only in
-    # /nix/store. Two NixOS mechanisms make unpatched FHS binaries work:
-    #   nix-ld  — installs a stock ld-linux at the conventional interpreter
-    #             path (/lib64/ld-linux-x86-64.so.2 etc.) that resolves the
-    #             libraries below for any freshly-exec'd child (the Worker
-    #             spawns one per step).
-    #   envfs   — serves /usr/bin and /bin as a FUSE map onto the system PATH,
-    #             so '#!/usr/bin/env' and absolute /usr/bin/<tool> execs resolve.
-    programs.nix-ld.enable = lib.mkDefault true;
-    programs.nix-ld.libraries = with pkgs; [
-      stdenv.cc.cc.lib  # libstdc++, libgcc_s
-      zlib
-      openssl
-      icu
-      krb5
-      curl
-      lttng-ust
-      numactl
-    ];
-    services.envfs.enable = lib.mkDefault true;
+    # NOTE: do NOT set LogTarget=console with LogLevel=debug here. The QEMU
+    # serial socket has no guaranteed reader; a flood of debug writes to
+    # /dev/console blocks on a full buffer and deadlocks PID 1 (silent hang).
+    # Logs go to the journal (fast); read them post-pivot via the serial
+    # getty shell or ssh with `journalctl`.
 
-    networking.useDHCP = lib.mkDefault true;
-    networking.nameservers = lib.mkDefault dnsServerList;
-
-    # Serial console on ttyS0 (x86) + ttyAMA0 (aarch64 virt) + hvc0 (riscv virt).
-    # When the activator hangs mid-pivot we attach to the serial socket on the
-    # host and see raw kernel + systemd + getty output — no SSH, no network, no
-    # D-Bus required. Autologin keeps us from needing a password.
-    boot.kernelParams = [ "console=ttyS0,115200" "console=ttyAMA0,115200" "console=hvc0" ];
+    # Serial getty on ttyS0 (x86) / ttyAMA0 (aarch64 virt) / hvc0 (riscv virt)
+    # with autologin, so we get a live post-pivot shell over the QEMU serial
+    # socket even when the network is down. (console= kernelParams are inert
+    # on soft-reboot but the host's original cmdline already enables the right
+    # serial console on these images.)
     systemd.services."serial-getty@ttyS0".enable = lib.mkDefault true;
     systemd.services."serial-getty@ttyAMA0".enable = lib.mkDefault true;
     systemd.services."serial-getty@hvc0".enable = lib.mkDefault true;
     services.getty.autologinUser = lib.mkDefault username;
+
+    networking.useDHCP = lib.mkDefault true;
+    networking.nameservers = lib.mkDefault dnsServerList;
+
+    # sshd on the pivoted system so we can SSH straight in to inspect the
+    # running runner (far more reliable than the QEMU serial socket). The host
+    # user's existing ~/.ssh/authorized_keys rides across the pivot (/home is
+    # bind-mounted, mutableUsers keeps it), so the same key that reached Ubuntu
+    # reaches NixOS.
+    services.openssh.enable = lib.mkDefault true;
 
     users.users.${username} = lib.mkDefault {
       isNormalUser = true;

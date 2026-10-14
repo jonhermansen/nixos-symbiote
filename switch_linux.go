@@ -298,6 +298,14 @@ func constructRoot(system string) string {
 		syscall.Mount("", filepath.Join(newRoot, "lib/firmware"), "", syscall.MS_PRIVATE, "")
 	}
 
+	// Bind /dev, /proc, /sys NON-recursively. Do NOT use MS_REC here: a
+	// recursive bind of /sys pulls in the /sys/fs/cgroup hierarchy, which
+	// corrupts the live cgroup controller tree — the old systemd then fails
+	// every cgroup op during soft-reboot ("Failed to create cgroup",
+	// "enable/disable controllers on cgroup /") and deadlocks mid-shutdown
+	// (hard hang, PID 1 never pivots). Non-recursive binds leave the host's
+	// cgroup hierarchy intact; systemd's own switch_root transfer_table
+	// re-binds /dev/sys/proc recursively on the NixOS side as needed.
 	for _, d := range []string{"dev", "proc", "sys"} {
 		syscall.Mount("/"+d, filepath.Join(newRoot, d), "", syscall.MS_BIND, "")
 	}
@@ -358,32 +366,6 @@ func constructRoot(system string) string {
 		}
 		syscall.Mount("", dst, "", syscall.MS_PRIVATE, "")
 		trace("construct", "agent-lib preserved: %s", hostPath)
-	}
-
-	// Preserve a few /etc runtime files the agent needs to reach GitHub right
-	// after the pivot, before NixOS networking/PKI fully materializes:
-	//   resolv.conf  — DNS (Azure resolver) so the runner's HTTPS reconnect
-	//                  resolves api.github.com without a gap
-	//   nsswitch.conf — name resolution order for the above
-	// Bind as single files onto pre-created empty files in newRoot. These are
-	// benign on NixOS (Azure DNS works for the job too). CA certs are NOT
-	// bound — NixOS provides its own /etc/ssl/certs/ca-certificates.crt.
-	for _, f := range []string{"etc/resolv.conf", "etc/nsswitch.conf"} {
-		hostPath := "/" + f
-		if _, err := os.Stat(hostPath); err != nil {
-			continue
-		}
-		dst := filepath.Join(newRoot, f)
-		os.MkdirAll(filepath.Dir(dst), 0755)
-		// create an empty regular file as the bind target
-		if fh, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			fh.Close()
-		}
-		if err := syscall.Mount(hostPath, dst, "", syscall.MS_BIND, ""); err != nil {
-			trace("construct", "agent-etc bind %s FAILED: %v", hostPath, err)
-			continue
-		}
-		trace("construct", "agent-etc preserved: %s", hostPath)
 	}
 
 	// Symlinks for systemd + systemd-executor (point into bind-mounted /nix).
@@ -574,6 +556,7 @@ func softReboot(newRoot, system string) error {
 		exit := cmd.ProcessState.ExitCode()
 		if state == "running" {
 			trace("reboot", "phase 2 done after %d polls: state=running", i)
+			postPivotInspect(systemdPkg, system)
 			return nil
 		}
 		if state == "degraded" && !triedResetFailed {
@@ -621,6 +604,82 @@ func softReboot(newRoot, system string) error {
 			dumpStuckState(i)
 		}
 	}
+}
+
+// postPivotInspect runs the runner-continuity battery ON the pivoted NixOS
+// (the activator survives the pivot) and writes results to the trace, which
+// persists on the shared /var disk — so we read ground truth after the fact
+// without SSH/serial access to the new system. Each probe maps to a
+// hypothesis: runner alive (H1), exec/libs (H2), network/DNS (H3), TLS (H4),
+// /dev/shm+pts (H6).
+func postPivotInspect(systemdPkg, system string) {
+	// IMPORTANT: Go's exec resolves argv[0] via the CALLER's $PATH (os.Environ),
+	// NOT cmd.Env — and our PATH is stale Ubuntu post-pivot. So every command
+	// must be an ABSOLUTE path into the built system's sw/bin (we know its
+	// store path; don't rely on /run/current-system resolving).
+	swBin := filepath.Join(system, "sw/bin")
+	bin := func(name string) string { return filepath.Join(swBin, name) }
+	probes := []struct {
+		name string
+		argv []string
+	}{
+		{"host", []string{bin("hostname")}},
+		{"runner-procs(H1)", []string{bin("pgrep"), "-af", `Runner\.|dotnet`}},
+		{"net(H3)", []string{bin("ip"), "-o", "-4", "addr", "show"}},
+		{"dns", []string{bin("cat"), "/etc/resolv.conf"}},
+		{"dev-shm(H6)", []string{bin("findmnt"), "/dev/shm"}},
+		{"github-tls(H4)", []string{bin("curl"), "-sS", "--max-time", "8", "-o", "/dev/null", "-w", "http=%{http_code}", "https://api.github.com"}},
+		{"ld-cache(H2)", []string{bin("ls"), "-la", "/etc/ld.so.cache"}},
+	}
+	trace("inspect", "===== POST-PIVOT BATTERY =====")
+	for _, p := range probes {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		cmd := exec.CommandContext(ctx, p.argv[0], p.argv[1:]...)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		trace("inspect", "[%s] err=%v: %s", p.name, err, strings.TrimSpace(string(out)))
+	}
+	waitK3s(system, systemdPkg)
+}
+
+// waitK3s is the acceptance test: on the pivoted NixOS, k3s must start and the
+// single node must report Ready. The kube-apiserver needs a warmup after the
+// service goes active, so poll with retries. Writes progress to the trace.
+func waitK3s(system, systemdPkg string) {
+	k3s := filepath.Join(system, "sw/bin/k3s")
+	systemctl := filepath.Join(systemdPkg, "bin/systemctl")
+	journalctl := filepath.Join(systemdPkg, "bin/journalctl")
+	if _, err := os.Stat(k3s); err != nil {
+		trace("k3s", "k3s not in system closure — skipping (config has no services.k3s)")
+		return
+	}
+	trace("k3s", "===== waiting for k3s node Ready =====")
+	// All commands by ABSOLUTE path — Go's exec resolves argv[0] via the
+	// caller's stale $PATH, not any env we set.
+	run := func(timeout time.Duration, argv ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	const deadline = 180 // ~3 min: image unpack + apiserver warmup
+	for i := 0; i < deadline; i++ {
+		nodes, err := run(10*time.Second, k3s, "kubectl", "get", "nodes", "--no-headers")
+		if err == nil && strings.Contains(nodes, " Ready") {
+			trace("k3s", "*** NODE READY after %ds ***\n%s", i, nodes)
+			pods, _ := run(10*time.Second, k3s, "kubectl", "get", "pods", "-A", "--no-headers")
+			trace("k3s", "system pods:\n%s", pods)
+			return
+		}
+		if i%10 == 0 {
+			active, _ := run(5*time.Second, systemctl, "is-active", "k3s")
+			trace("k3s", "poll #%d: k3s.service=%q nodes=%q err=%v", i, active, nodes, err)
+		}
+		time.Sleep(1 * time.Second)
+	}
+	trace("k3s", "FAILED: node not Ready within %ds", deadline)
+	jlog, _ := run(10*time.Second, journalctl, "-u", "k3s", "--no-pager", "-n", "40")
+	trace("k3s", "k3s journal tail:\n%s", jlog)
 }
 
 // dumpPrePivot writes everything we might need to understand a pivot
