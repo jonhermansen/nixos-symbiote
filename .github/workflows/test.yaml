@@ -12,10 +12,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             arch: x86_64
             flake-attr: linux-amd64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             arch: aarch64
             flake-attr: linux-arm64
           # riscv64 disabled: RISE RISC-V Builders runners are frequently
