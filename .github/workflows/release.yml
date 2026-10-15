@@ -41,12 +41,11 @@ jobs:
         run: |
           mkdir -p dist
           cp result/bin/nixos-symbiote dist/${{ matrix.asset }}
-          (cd dist && sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256)
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}*
+          path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
   publish:
@@ -62,6 +61,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Checksums
+        # One aggregate SHA256SUMS + SHA512SUMS over ALL release binaries,
+        # in the standard coreutils format so anyone can verify with:
+        #   sha256sum -c SHA256SUMS   (or sha512sum -c SHA512SUMS)
+        run: |
+          cd dist
+          sha256sum nixos-symbiote-* > SHA256SUMS
+          sha512sum nixos-symbiote-* > SHA512SUMS
+          echo "== SHA256SUMS =="; cat SHA256SUMS
 
       - name: Publish release
         env:
