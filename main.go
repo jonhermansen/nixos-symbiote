@@ -269,18 +269,44 @@ func mustRun(cmd *exec.Cmd) {
 	}
 }
 
+// dnsServers returns the host's REAL upstream resolvers to carry into the
+// pivoted system. We can't control where the host is provisioned, so we must
+// inherit — but naively reading /etc/resolv.conf fails on systemd-resolved
+// hosts, where it's just the 127.0.0.53 stub (nothing listens on it post-pivot
+// once resolved is gone). So: prefer /run/systemd/resolve/resolv.conf (the
+// actual upstreams resolved forwards to), merge /etc/resolv.conf, and drop
+// loopback stubs. Fall back to a public resolver only if nothing real is found.
 func dnsServers() string {
-	f, err := os.Open("/etc/resolv.conf")
-	if err != nil {
-		return "1.1.1.1"
+	parse := func(path string) []string {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		var out []string
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			line := strings.TrimSpace(s.Text())
+			if ns, ok := strings.CutPrefix(line, "nameserver "); ok {
+				ns = strings.TrimSpace(ns)
+				// Skip loopback stubs (127.0.0.0/8, ::1) — they only work
+				// while the host's local resolver is running.
+				if strings.HasPrefix(ns, "127.") || ns == "::1" {
+					continue
+				}
+				out = append(out, ns)
+			}
+		}
+		return out
 	}
-	defer f.Close()
+	seen := map[string]bool{}
 	var servers []string
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		if strings.HasPrefix(line, "nameserver ") {
-			servers = append(servers, strings.TrimPrefix(line, "nameserver "))
+	for _, path := range []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"} {
+		for _, ns := range parse(path) {
+			if !seen[ns] {
+				seen[ns] = true
+				servers = append(servers, ns)
+			}
 		}
 	}
 	if len(servers) == 0 {
