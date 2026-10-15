@@ -90,7 +90,7 @@ jobs:
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
         with:
           extra_nix_config: |
-            extra-substituters = s3://nixos-symbiote?endpoint=${{ secrets.R2_ENDPOINT }}&region=auto
+            extra-substituters = s3://nixos-symbiote?endpoint=e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto
             extra-trusted-public-keys = nixos-symbiote-2:04hzKpsfZ75z6MW8kpALD2gfLuCdnP5fbGdyjHNbsCM=
 
       - name: Build symbiote binary
@@ -114,7 +114,7 @@ jobs:
         run: |
           echo "$NIX_CACHE_PRIV_KEY" > /tmp/cache-priv.key
           nix store sign --key-file /tmp/cache-priv.key --recursive ./result
-          nix copy --to "s3://nixos-symbiote?endpoint=${{ secrets.R2_ENDPOINT }}&region=auto" ./result
+          nix copy --to "s3://nixos-symbiote?endpoint=e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto" ./result
           rm -f /tmp/cache-priv.key
 
       - name: Baseline diagnostic upload (pre-pivot)

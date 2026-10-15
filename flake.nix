@@ -6,9 +6,13 @@
   # Project binary cache on Cloudflare R2 (bucket: nixos-symbiote).
   # Local nix users get it automatically after accepting the flake config
   # prompt; CI passes --accept-flake-config to use it non-interactively.
+  # NOTE: nix's s3:// `endpoint` param wants a BARE hostname, not a URL — a
+  # "https://" prefix makes nix form a malformed request path and R2 returns
+  # "Path is invalid (2054)", so nix disables the cache. (The aws CLI's
+  # --endpoint-url is the opposite: it DOES want https://.) Keep this bare.
   nixConfig = {
     extra-substituters = [
-      "s3://nixos-symbiote?endpoint=https://e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto"
+      "s3://nixos-symbiote?endpoint=e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto"
     ];
     extra-trusted-public-keys = [
       "nixos-symbiote-2:04hzKpsfZ75z6MW8kpALD2gfLuCdnP5fbGdyjHNbsCM="
