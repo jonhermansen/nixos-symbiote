@@ -2,7 +2,7 @@
 # k3s exercises systemd services, containerd, networking and cgroups — if the
 # single-node cluster reaches Ready, the soft-reboot produced a genuinely
 # functional NixOS host, not just a booting one.
-{ pkgs, ... }: {
+{ pkgs, config, ... }: {
   services.k3s = {
     enable = true;
     role = "server";

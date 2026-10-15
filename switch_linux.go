@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -123,6 +125,57 @@ func initTrace() {
 	if err == nil {
 		traceFile = f
 	}
+	// Remote log sink: the activator is a static binary that SURVIVES the
+	// pivot, so it can ship its own trace over a raw TCP socket — unlike a
+	// shell forwarder that depends on logger/tail/journalctl, which vanish
+	// when /usr becomes NixOS. SYMBIOTE_LOG_SINK="host:port" points at a
+	// line-oriented collector (e.g. rsyslog imtcp). Reconnects across the
+	// network blip during the pivot.
+	logSinkAddr = os.Getenv("SYMBIOTE_LOG_SINK")
+	logTag = os.Getenv("SYMBIOTE_LOG_TAG")
+	if logSinkAddr != "" {
+		dialLogSink()
+	}
+}
+
+var (
+	logSinkMu   sync.Mutex
+	logSink     net.Conn
+	logSinkAddr string
+	logTag      string
+)
+
+func dialLogSink() {
+	c, err := net.DialTimeout("tcp", logSinkAddr, 3*time.Second)
+	if err == nil {
+		logSink = c
+	}
+}
+
+// sinkWrite ships one line to the remote collector, reconnecting on failure
+// (the pivot briefly drops the network). Best-effort: never blocks tracing.
+func sinkWrite(line string) {
+	if logSinkAddr == "" {
+		return
+	}
+	logSinkMu.Lock()
+	defer logSinkMu.Unlock()
+	send := func() error {
+		if logSink == nil {
+			return fmt.Errorf("no conn")
+		}
+		logSink.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, err := fmt.Fprintf(logSink, "%s %s\n", logTag, line)
+		return err
+	}
+	if send() != nil {
+		if logSink != nil {
+			logSink.Close()
+			logSink = nil
+		}
+		dialLogSink()
+		_ = send()
+	}
 }
 
 func closeTrace() {
@@ -142,6 +195,7 @@ func trace(phase, format string, args ...interface{}) {
 		fmt.Fprintln(traceFile, line)
 		traceFile.Sync()
 	}
+	sinkWrite(line)
 }
 
 // --- scope protection ---
@@ -154,13 +208,23 @@ func ensureProtectedScope() {
 	if err != nil {
 		return
 	}
-	args := append([]string{
+	args := []string{
 		"systemd-run", "--scope",
 		"--property=DefaultDependencies=no",
 		"--property=IgnoreOnIsolate=yes",
 		"--property=SurviveFinalKillSignal=yes",
 		"--setenv=NIXOS_SYMBIOTE_PROTECTED=1",
-	}, os.Args...)
+	}
+	// The program re-runs from main() inside the scope, so buildSystem/
+	// invokingUser() execute AGAIN there. Pin the invoking identity across the
+	// scope boundary so the second build is byte-identical to the first (same
+	// user/uid/home) — otherwise we'd build and pivot into the WRONG system.
+	for _, k := range []string{"SUDO_USER", "SUDO_UID", "SUDO_GID", "SYMBIOTE_LOG_SINK", "SYMBIOTE_LOG_TAG"} {
+		if v := os.Getenv(k); v != "" {
+			args = append(args, "--setenv="+k+"="+v)
+		}
+	}
+	args = append(args, os.Args...)
 	syscall.Exec(sdrun, args, os.Environ())
 }
 
@@ -639,7 +703,43 @@ func postPivotInspect(systemdPkg, system string) {
 		cancel()
 		trace("inspect", "[%s] err=%v: %s", p.name, err, strings.TrimSpace(string(out)))
 	}
+	waitNetwork(system)
 	waitK3s(system, systemdPkg)
+}
+
+// waitNetwork is the networking acceptance probe (user's #1 priority): after the
+// pivot, networkd is a fresh daemon and the link may need DHCP to re-lease, so
+// connectivity is NOT instant. Poll until an external TCP+DNS round-trip
+// succeeds, and record how long it took — this is the definitive answer to
+// "does networking work post-pivot" rather than a single racy snapshot.
+func waitNetwork(system string) {
+	swBin := filepath.Join(system, "sw/bin")
+	curl := filepath.Join(swBin, "curl")
+	ipc := filepath.Join(swBin, "ip")
+	trace("net", "===== waiting for external network =====")
+	run := func(timeout time.Duration, argv ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	const deadline = 120 // DHCP re-lease + route install can lag the pivot
+	for i := 0; i < deadline; i++ {
+		// DNS resolution + TLS to a real host exercises the full stack
+		// (link up, route, resolv.conf upstreams) in one shot.
+		code, err := run(10*time.Second, curl, "-sS", "--max-time", "8",
+			"-o", "/dev/null", "-w", "%{http_code}", "https://api.github.com")
+		if err == nil && code == "200" {
+			trace("net", "*** NETWORK UP after %ds (api.github.com -> 200) ***", i)
+			return
+		}
+		if i%10 == 0 {
+			addr, _ := run(5*time.Second, ipc, "-o", "-4", "addr", "show", "scope", "global")
+			trace("net", "poll #%d: http=%q err=%v addrs=%q", i, code, err, addr)
+		}
+		time.Sleep(1 * time.Second)
+	}
+	trace("net", "FAILED: no external connectivity within %ds", deadline)
 }
 
 // waitK3s is the acceptance test: on the pivoted NixOS, k3s must start and the

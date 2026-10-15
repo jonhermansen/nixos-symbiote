@@ -6,7 +6,11 @@ let
   pkgs = import nixpkgs { system = builtins.currentSystem; };
   lib = pkgs.lib;
 
-  dnsServerList = builtins.filter (s: s != "") (builtins.split " " dnsServers);
+  # NB: lib.splitString (not builtins.split) — builtins.split returns the
+  # separators as empty LISTS between the pieces, which survive a `s != ""`
+  # filter and make nameservers a list-of-lists (type error). splitString
+  # yields plain strings; then drop empties from any double/trailing spaces.
+  dnsServerList = builtins.filter (s: s != "") (lib.splitString " " dnsServers);
   hasNixMount = nixDevice != "" && nixFsType != "";
   uid = builtins.fromJSON userUid;
 in
@@ -63,16 +67,14 @@ in
     systemd.services."serial-getty@hvc0".enable = lib.mkDefault true;
     services.getty.autologinUser = lib.mkDefault username;
 
-    # Inherit the host's live network across the pivot. soft-reboot keeps the
-    # running kernel, so the NIC and its IP/routes persist (addresses remain on
-    # the interface even after the host's dhcpcd exits — they're kernel state).
-    # If NixOS runs its own DHCP / networkd it FLUSHES and re-configures the
-    # interface, dropping connectivity (and the GH runner's live TCP) for a
-    # window — and on a single-boot soft-reboot there's no reason to. So leave
-    # the interface untouched and just supply resolv.conf statically from the
-    # host's resolvers, which `activate` writes at pivot time.
-    networking.useDHCP = lib.mkForce false;
-    networking.useNetworkd = lib.mkForce false;
+    # Bring the interface up via DHCP post-pivot. (An "inherit the live NIC"
+    # variant — useDHCP=false — left the link down on Azure/GHA with no
+    # connectivity, so DHCP is the proven path; it re-leases the same address,
+    # it's just not instant.) nameservers are seeded from the host's REAL
+    # upstream resolvers (see dnsServers() in main.go — it skips the
+    # systemd-resolved 127.0.0.53 stub) so DNS works immediately regardless of
+    # where the host is provisioned.
+    networking.useDHCP = lib.mkDefault true;
     networking.nameservers = lib.mkDefault dnsServerList;
 
     # sshd on the pivoted system so we can SSH straight in to inspect the
