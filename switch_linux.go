@@ -546,6 +546,25 @@ func softReboot(newRoot, system string) error {
 	// shows up in trace immediately instead of needing a journal grep.
 	dumpPrePivot(newRoot)
 
+	// Cleanly stop dbus BEFORE the pivot. soft-reboot preserves /run and
+	// serializes PID1's unit state; a dbus still "active" at pivot time is
+	// inherited by the new NixOS systemd as "active (dead PID)" — it queues a
+	// stop and then blocks the whole system in `starting` for TimeoutStopSec
+	// (90s) before SIGKILL. That is the ~90s phase-2 stall.
+	//
+	// Stop the SOCKET first (dbus is socket-activated; stopping only the
+	// service lets the socket respawn it on the next connection), then the
+	// service. This is a graceful SIGTERM to a live dbus, which exits in well
+	// under a second — NOT a timeout hack or a premature kill. soft-reboot
+	// itself does not need dbus: systemctl reaches PID1 over the private
+	// socket (/run/systemd/private) when the bus is gone.
+	for _, unit := range []string{"dbus.socket", "dbus.service"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		out, err := exec.CommandContext(ctx, "systemctl", "stop", unit).CombinedOutput()
+		cancel()
+		trace("reboot", "pre-pivot stop %s: err=%v out=%q", unit, err, strings.TrimSpace(string(out)))
+	}
+
 	trace("reboot", "triggering soft-reboot")
 	if err := exec.Command("systemctl", "soft-reboot").Run(); err != nil {
 		return fmt.Errorf("systemctl soft-reboot: %w", err)
