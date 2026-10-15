@@ -18,9 +18,17 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
             flake-attr: linux-arm64
-          - runner: ubuntu-24.04-riscv
-            arch: riscv64
-            flake-attr: linux-riscv64
+          # riscv64 test lane DISABLED — permanently, not a capacity issue.
+          # The RISE RISC-V runner runs the job inside a Kubernetes pod /
+          # containerd container (PID 1 = docker-init/tini, no systemd:
+          # "System has not been booted with systemd as init system").
+          # The soft-reboot pivot requires systemd + kernel control, which a
+          # container cannot provide. The riscv64 BINARY still ships — it's
+          # cross-compiled statically via the linux-riscv64 flake attr on
+          # amd64/arm64 runners (release.yml), no riscv runner needed.
+          # - runner: ubuntu-24.04-riscv
+          #   arch: riscv64
+          #   flake-attr: linux-riscv64
     runs-on: ${{ matrix.runner }}
     # Short overall budget — we want to force fast failure so GH doesn't
     # cancel us at the 25-min mark and purge the live step log. Each sub-
