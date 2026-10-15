@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Version is injected via -ldflags "-X main.Version=..." at build time
@@ -35,6 +37,8 @@ func main() {
 }
 
 func run(args []string) error {
+	ensureRoot()
+
 	cfg := parseArgs(args)
 
 	nixBin := ensureNix()
@@ -236,6 +240,8 @@ func buildSystem(nixBin string, cfg config) string {
 	rootDev, rootFs := mountSource("/")
 	nixDev, nixFs := mountSource("/nix")
 
+	invUser, invHome, invUid := invokingUser()
+
 	scriptDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 
 	cmd := exec.Command(filepath.Join(nixBin, "nix-build"), filepath.Join(scriptDir, "system.nix"),
@@ -246,9 +252,9 @@ func buildSystem(nixBin string, cfg config) string {
 		"--argstr", "nixDevice", nixDev,
 		"--argstr", "nixFsType", nixFs,
 		"--argstr", "dnsServers", dnsServers(),
-		"--argstr", "username", os.Getenv("USER"),
-		"--argstr", "userHome", os.Getenv("HOME"),
-		"--argstr", "userUid", strconv.Itoa(os.Getuid()),
+		"--argstr", "username", invUser,
+		"--argstr", "userHome", invHome,
+		"--argstr", "userUid", invUid,
 		"--no-out-link",
 	)
 	cmd.Stderr = os.Stderr
@@ -257,6 +263,69 @@ func buildSystem(nixBin string, cfg config) string {
 		log.Fatalf("nix-build: %v", err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// --- privilege + identity ---
+
+// ensureRoot re-execs the binary under sudo when we're not already root. The
+// pivot needs CAP_SYS_ADMIN (mount, pivot_root, soft-reboot), so the whole run
+// must be privileged. We DON'T use a setuid bit — the binary may live in the
+// read-only nix store (Nix strips setuid; that's what security.wrappers are
+// for), and sudo is the portable path anyway. sudo always sets SUDO_USER/
+// SUDO_UID, which invokingUser() reads back, so self-elevation never loses the
+// real identity.
+func ensureRoot() {
+	if os.Geteuid() == 0 {
+		return
+	}
+	sudo, err := exec.LookPath("sudo")
+	if err != nil {
+		log.Fatal("must run as root (CAP_SYS_ADMIN for mount/pivot_root/soft-reboot); sudo not found")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		self = os.Args[0]
+	}
+	log.Println("not root — re-executing under sudo")
+	// Preserve our debug env (log sink) across the sudo boundary; sudo's
+	// env_reset would otherwise drop them.
+	argv := []string{"sudo",
+		"--preserve-env=SYMBIOTE_LOG_SINK,SYMBIOTE_LOG_TAG,NIXOS_SYMBIOTE_PROTECTED",
+		self}
+	argv = append(argv, os.Args[1:]...)
+	if err := syscall.Exec(sudo, argv, os.Environ()); err != nil {
+		log.Fatalf("sudo self-elevation failed: %v", err)
+	}
+}
+
+// invokingUser resolves the real login/runner identity to carry into the
+// pivoted NixOS, even under sudo (which sets USER=root, HOME=/root, uid=0).
+// Preferring SUDO_* reconstructs the SAME account (uid + authorized_keys +
+// home) on the other side of the pivot rather than substituting root — needed
+// to SSH back in, and posture-neutral by design. Home/uid are resolved from
+// the account database (osusergo pure-Go passwd parse; CGO is disabled) rather
+// than trusting $HOME, which sudo may have reset.
+func invokingUser() (name, home, uid string) {
+	name = os.Getenv("SUDO_USER")
+	uid = os.Getenv("SUDO_UID")
+	if name == "" {
+		name = os.Getenv("USER")
+	}
+	if uid == "" {
+		uid = strconv.Itoa(os.Getuid())
+	}
+	if u, err := user.Lookup(name); err == nil {
+		home = u.HomeDir
+		uid = u.Uid
+	}
+	if home == "" {
+		if h := os.Getenv("HOME"); h != "" && os.Getenv("SUDO_USER") == "" {
+			home = h
+		} else {
+			home = "/home/" + name
+		}
+	}
+	return name, home, uid
 }
 
 // --- helpers ---
