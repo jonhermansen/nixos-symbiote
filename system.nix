@@ -57,6 +57,7 @@ in
     environment.systemPackages = lib.mkBefore [
       pkgs.bash pkgs.dash pkgs.coreutils pkgs.procps pkgs.gnugrep
       pkgs.gnused pkgs.gawk pkgs.findutils pkgs.gnutar pkgs.gzip pkgs.util-linux
+      pkgs.git pkgs.systemd pkgs.awscli2
     ];
     system.activationScripts.runnerFhs = let
       userland = pkgs.buildEnv {
@@ -64,6 +65,10 @@ in
         paths = with pkgs; [
           bash coreutils procps gnugrep gnused gawk findutils gnutar gzip
           util-linux which
+          # Enumerated from the workflow's post-pivot `run:` blocks:
+          git        # actions/checkout and its post/cleanup step shell out to it
+          systemd    # systemctl / journalctl (Wait-for-NixOS, watchdog, diag)
+          awscli2    # `aws s3 cp` — diagnostic uploads to R2
         ];
         ignoreCollisions = true;
       };
@@ -74,6 +79,11 @@ in
         ln -sfn "$f" "/usr/bin/$b"
         ln -sfn "$f" "/bin/$b"
       done
+      # sudo is used 36× by the workflow but is SETUID — the store binary isn't
+      # (nix store is read-only), so point at NixOS's setuid wrapper instead of
+      # the userland buildEnv. security.sudo gives us /run/wrappers/bin/sudo.
+      ln -sfn /run/wrappers/bin/sudo /usr/bin/sudo
+      ln -sfn /run/wrappers/bin/sudo /bin/sudo
     '';
 
     # (2) node: the runner executes every JS action (checkout, upload-artifact,
@@ -83,11 +93,13 @@ in
     #     executable"). Replace it in place with nixpkgs node — same major, but
     #     patchelf'd to the store loader so it runs natively, no nix-ld. Also
     #     drop a node on PATH for steps that call it directly.
+    #     The runner's layout varies by image (x86_64:
+    #     /home/runner/actions-runner/cached/<ver>/externals/node24/...;
+    #     aarch64: /home/runner/extracted/externals/node24/...), so FIND every
+    #     bundled node rather than guessing paths.
     system.activationScripts.runnerNode = ''
-      for nd in /home/*/actions-runner/cached/*/externals/node*/bin/node \
-                /home/*/runners/*/externals/node*/bin/node \
-                /opt/*/externals/node*/bin/node; do
-        [ -e "$nd" ] || continue
+      for nd in $(${pkgs.findutils}/bin/find /home /opt -maxdepth 8 \
+                    -path '*/externals/node*/bin/node' 2>/dev/null); do
         ln -sfn ${pkgs.nodejs_24}/bin/node "$nd"
       done
       ln -sfn ${pkgs.nodejs_24}/bin/node /usr/bin/node

@@ -331,6 +331,14 @@ jobs:
           hello
           echo "OS=$(sed -n 's/^ID=//p' /etc/os-release)"
 
+      - name: Proof of pivot (fastfetch)
+        if: success()
+        run: |
+          # Visual proof the userland is NixOS while the kernel is still the
+          # host's Ubuntu kernel (soft-reboot keeps the kernel). Expect
+          # `OS: NixOS` + `Kernel: *-azure` (or similar) in one panel.
+          fastfetch || /run/current-system/sw/bin/fastfetch
+
       - name: Collect diagnostics for upload
         if: always()
         run: |
