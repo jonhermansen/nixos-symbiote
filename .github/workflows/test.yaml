@@ -20,71 +20,14 @@ jobs:
             flake-attr: linux-arm64
           # riscv64 test lane DISABLED — permanently, not a capacity issue.
           # The RISE RISC-V runner runs the job inside a Kubernetes pod /
-          # containerd container (PID 1 = docker-init/tini, no systemd:
-          # "System has not been booted with systemd as init system").
-          # The soft-reboot pivot requires systemd + kernel control, which a
-          # container cannot provide. The riscv64 BINARY still ships — it's
-          # cross-compiled statically via the linux-riscv64 flake attr on
-          # amd64/arm64 runners (release.yml), no riscv runner needed.
+          # containerd container (PID 1 = docker-init/tini, no systemd), and
+          # the soft-reboot pivot needs systemd + kernel control. The riscv64
+          # BINARY still ships, cross-compiled on amd64/arm64 (release.yml).
           # - runner: ubuntu-24.04-riscv
-          #   arch: riscv64
-          #   flake-attr: linux-riscv64
     runs-on: ${{ matrix.runner }}
-    # Short overall budget — we want to force fast failure so GH doesn't
-    # cancel us at the 25-min mark and purge the live step log. Each sub-
-    # step has its own timeout; this is the backstop.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Pre-flight runner inventory (streamed)
-        run: |
-          echo "=== all Runner.* / Actions processes ==="
-          sudo ps -eo pid,ppid,user,comm,args | grep -i -E 'runner|action' | grep -v grep || true
-          echo "=== cgroup for each Runner.Listener / Runner.Worker ==="
-          for pid in $(pgrep -f 'Runner\.(Listener|Worker)' || true); do
-            echo "--- pid=$pid ---"
-            sudo cat /proc/$pid/cgroup 2>/dev/null || echo "<gone>"
-            sudo tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null; echo
-          done
-          echo "=== own cgroup ==="
-          cat /proc/self/cgroup
-          echo "=== all .scope units ==="
-          systemctl list-units --type=scope --no-pager --all || true
-
-      - name: Prepare persistent trace dir
-        run: |
-          sudo mkdir -p /var/log/symbiote
-          sudo chmod 755 /var/log/symbiote
-          : | sudo tee /var/log/symbiote/trace.log /var/log/symbiote/watchdog.log /var/log/symbiote/journal.log > /dev/null
-          echo "boot=$(date -u +%s) runner=${{ matrix.runner }}" | sudo tee /var/log/symbiote/boot-id
-
-      - name: Start protected watchdog (writes to disk)
-        run: |
-          sudo systemd-run --unit=symbiote-watchdog \
-            --property=DefaultDependencies=no \
-            --property=IgnoreOnIsolate=yes \
-            --property=SurviveFinalKillSignal=yes \
-            bash -c '
-              exec >> /var/log/symbiote/watchdog.log 2>&1
-              while true; do
-                ts=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-                state=$(timeout 2 systemctl is-system-running 2>&1 || echo UNREACHABLE)
-                nixos=$(test -f /etc/NIXOS && echo yes || echo no)
-                osid=$(sed -n "s/^ID=//p" /etc/os-release 2>/dev/null || echo unknown)
-                runners=$(pgrep -f "Runner\.(Listener|Worker)" | tr "\n" " ")
-                echo "WD $ts state=$state nixos=$nixos os=$osid runners=[$runners]"
-                sleep 1
-              done
-            '
-
-      - name: Start protected journal logger
-        run: |
-          sudo systemd-run --unit=journal-logger \
-            --property=DefaultDependencies=no \
-            --property=IgnoreOnIsolate=yes \
-            --property=SurviveFinalKillSignal=yes \
-            bash -c 'journalctl -f -o short-monotonic --no-pager >> /var/log/symbiote/journal.log 2>&1'
 
       - name: Install Nix
         uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
@@ -103,7 +46,6 @@ jobs:
           cp result/bin/nixos-symbiote ./nixos-symbiote
           chmod +x ./nixos-symbiote
           ./nixos-symbiote --version
-          file ./nixos-symbiote
 
       - name: Push build to R2 cache
         if: success()
@@ -117,248 +59,43 @@ jobs:
           nix copy --to "s3://nixos-symbiote?endpoint=e07b6927af7f0bcd485d715838df45ba.r2.cloudflarestorage.com&region=auto" ./result
           rm -f /tmp/cache-priv.key
 
-      - name: Baseline diagnostic upload (pre-pivot)
-        # GHA cancellations purge logs AND skip later steps, so R2 is the
-        # only reliable escape hatch for pivot-failure diagnostics.
+      - name: Invoke activator (pivot to NixOS)
+        timeout-minutes: 5
+        # The symbiote is a static binary. It performs the soft-reboot pivot and
+        # streams its OWN trace two ways: to stdout (captured here in the step
+        # log) and to SYMBIOTE_LOG_SINK — a static TCP sink that survives the
+        # pivot. This replaces the old shell systemd-run forwarder/watchdog
+        # units, which depended on tail/journalctl/logger (gone post-pivot),
+        # failed, and drove the pivoted system `degraded`.
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_EC2_METADATA_DISABLED: "true"
-          AWS_DEFAULT_REGION: auto
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          SYMBIOTE_LOG_SINK: ${{ secrets.SYSLOG_HOST }}:${{ secrets.SYSLOG_PORT }}
+          SYMBIOTE_LOG_TAG: SYMB-${{ github.run_id }}-${{ matrix.arch }}
         run: |
-          set -x
-          # Build the dir as the runner user first (writable), then pull in
-          # root-owned logs last so our own redirects never hit a root-owned dir.
-          mkdir -p /tmp/baseline
-          systemctl --no-pager --version | head -1 > /tmp/baseline/systemd-version.txt
-          sudo cat /proc/self/mountinfo > /tmp/baseline/mountinfo.txt
-          echo "run_id=${{ github.run_id }} arch=${{ matrix.arch }}" > /tmp/baseline/id.txt
-          sudo cp -a /var/log/symbiote/. /tmp/baseline/ 2>/dev/null || true
-          sudo chown -R "$USER" /tmp/baseline
-          tar czf /tmp/baseline.tgz -C /tmp baseline
-          aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/baseline.tgz \
-            "s3://nixos-symbiote/diag/${{ github.run_id }}-${{ matrix.arch }}-baseline.tgz"
+          echo "::add-mask::${{ secrets.SYSLOG_HOST }}"
+          sudo --preserve-env=SYMBIOTE_LOG_SINK,SYMBIOTE_LOG_TAG \
+            ./nixos-symbiote --config test/configuration-minimal.nix
+          echo "=== activator exit=$? ==="
 
-      - name: Start protected syslog forwarder (survives pivot)
-        # Real-time log exfil to our Oracle Cloud rsyslog box. logger -T
-        # opens a TCP connection straight to the remote syslogd, bypassing
-        # the local rsyslog (which is stopped during soft-reboot). Each
-        # line ships the instant it is written, so systemd's own
-        # "Failed to switch root: <errno>" — emitted late in the shutdown,
-        # after batch-upload approaches have already lost the network —
-        # reaches the box before the pivot tears anything down. The unit is
-        # SurviveFinalKillSignal so it keeps forwarding across the attempt;
-        # the while-loops re-establish the tails if journald/the file
-        # momentarily go away during the systemd re-exec.
-        env:
-          SYSLOG_HOST: ${{ secrets.SYSLOG_HOST }}
-          SYSLOG_PORT: ${{ secrets.SYSLOG_PORT }}
-          TAG: ${{ github.run_id }}-${{ matrix.arch }}
+      - name: Verify NixOS + smoke tests
         run: |
-          # Belt-and-suspenders: mask the host in logs even if the secret
-          # is ever echoed by a traced subcommand.
-          echo "::add-mask::$SYSLOG_HOST"
-          sudo systemd-run --unit=symbiote-syslog-journal \
-            --property=DefaultDependencies=no \
-            --property=IgnoreOnIsolate=yes \
-            --property=SurviveFinalKillSignal=yes \
-            --setenv=SYSLOG_HOST="$SYSLOG_HOST" \
-            --setenv=SYSLOG_PORT="$SYSLOG_PORT" \
-            --setenv=TAG="$TAG" \
-            bash -c '
-              while true; do
-                journalctl -f -o short-monotonic --no-pager 2>/dev/null \
-                  | logger -T -n "$SYSLOG_HOST" -P "$SYSLOG_PORT" -t "JRNL-$TAG"
-                sleep 1
-              done
-            '
-          sudo systemd-run --unit=symbiote-syslog-trace \
-            --property=DefaultDependencies=no \
-            --property=IgnoreOnIsolate=yes \
-            --property=SurviveFinalKillSignal=yes \
-            --setenv=SYSLOG_HOST="$SYSLOG_HOST" \
-            --setenv=SYSLOG_PORT="$SYSLOG_PORT" \
-            --setenv=TAG="$TAG" \
-            bash -c '
-              while true; do
-                tail -F -n +1 \
-                  /var/log/symbiote/trace.log \
-                  /var/log/symbiote/watchdog.log 2>/dev/null \
-                  | logger -T -n "$SYSLOG_HOST" -P "$SYSLOG_PORT" -t "SYMB-$TAG"
-                sleep 1
-              done
-            '
-          # Forward the GH runner's OWN diagnostic logs so its exact
-          # post-pivot failure (missing lib, TLS error, failed exec) is
-          # visible in real time instead of guessed at.
-          sudo systemd-run --unit=symbiote-syslog-diag \
-            --property=DefaultDependencies=no \
-            --property=IgnoreOnIsolate=yes \
-            --property=SurviveFinalKillSignal=yes \
-            --setenv=SYSLOG_HOST="$SYSLOG_HOST" \
-            --setenv=SYSLOG_PORT="$SYSLOG_PORT" \
-            --setenv=TAG="$TAG" \
-            bash -c '
-              while true; do
-                tail -F -n +1 \
-                  /home/runner/runners/*/_diag/Worker_*.log \
-                  /home/runner/runners/*/_diag/Runner_*.log 2>/dev/null \
-                  | logger -T -n "$SYSLOG_HOST" -P "$SYSLOG_PORT" -t "DIAG-$TAG"
-                sleep 2
-              done
-            '
-          # Prove the path works right now, before any pivot.
-          logger -T -n "$SYSLOG_HOST" -P "$SYSLOG_PORT" -t "HELLO-$TAG" "forwarder armed on $(hostname) arch=${{ matrix.arch }}"
-
-      - name: Invoke activator (triggers soft-reboot)
-        timeout-minutes: 4
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          AWS_EC2_METADATA_DISABLED: "true"
-          AWS_DEFAULT_REGION: auto
-          GHA_RUN_ID: ${{ github.run_id }}
-          GHA_ARCH: ${{ matrix.arch }}
-        run: |
-          # Live-tail trace + watchdog + journal so step stdout captures
-          # everything in real time. GHA job-timeout cancellations purge
-          # artifacts and job logs, so this live stream is often the only
-          # data we get out on a hang.
-          sudo tail -F -n 0 \
-            /var/log/symbiote/trace.log \
-            /var/log/symbiote/watchdog.log \
-            /var/log/symbiote/journal.log &
-          TAIL_PID=$!
-          # On ANY exit (incl. SIGTERM from step timeout), dump everything
-          # we have one more time via direct cat so the step log has a
-          # non-tail copy at the end. Also give the watchdog a moment to
-          # flush its final line.
-          trap '
-            RC=$?
-            echo "=== trap fired exit=$RC ==="
-            sleep 1
-            sudo kill '"$TAIL_PID"' 2>/dev/null || true
-            echo "=== FINAL trace.log ==="
-            sudo cat /var/log/symbiote/trace.log 2>/dev/null || echo "(no trace)"
-            echo "=== FINAL watchdog.log ==="
-            sudo cat /var/log/symbiote/watchdog.log 2>/dev/null || echo "(no watchdog)"
-            echo "=== FINAL journal.log (last 400 lines) ==="
-            sudo tail -400 /var/log/symbiote/journal.log 2>/dev/null || echo "(no journal)"
-            # Upload full post-mortem to R2 so cancellation does not steal our logs.
-            sudo tar czf /tmp/postmortem.tgz -C /var/log symbiote
-            aws --endpoint-url "$R2_ENDPOINT" s3 cp /tmp/postmortem.tgz \
-              "s3://nixos-symbiote/diag/${GHA_RUN_ID}-${GHA_ARCH}-postmortem.tgz"
-          ' EXIT
-          echo "=== invoking activator ==="
-          sudo ./nixos-symbiote --config test/configuration-minimal.nix
-          echo "=== activator returned exit=$? ==="
-
-      - name: Wait for NixOS
-        timeout-minutes: 4
-        run: |
-          set -u
-          # Dump cheap sanity info first so we learn SOMETHING even if the
-          # system is misbehaving. These don't need systemctl.
-          echo "=== static sanity (no systemd needed) ==="
-          uname -a || true
-          cat /proc/1/comm 2>/dev/null | tr -d '\n'; echo " (pid 1 comm)"
-          readlink /proc/1/exe 2>/dev/null | tr -d '\n'; echo " (pid 1 exe)"
-          cat /etc/os-release 2>/dev/null || echo "(no /etc/os-release)"
-          readlink /sbin/init 2>/dev/null | tr -d '\n'; echo " (sbin/init)"
-          ls /nix/store 2>/dev/null | head -3 || echo "(no /nix/store)"
-          readlink /run/current-system 2>/dev/null | tr -d '\n'; echo " (current-system)"
-          echo "=== dmesg tail (last 60 kernel lines) ==="
-          sudo dmesg --nopager 2>/dev/null | tail -60 || true
-          echo "=== runner _diag listing ==="
-          sudo ls -la /home/runner/runners/*/_diag/ 2>/dev/null | head -20 || echo "(no runner _diag found)"
-          echo "=== polling for pivot to NixOS ==="
-          # Condition-based wait — no magic numbers. The step timeout bounds us.
-          tick=0
-          until osid=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null) && [ "$osid" = "nixos" ]; do
-            tick=$((tick+1))
-            pid1_comm=$(cat /proc/1/comm 2>/dev/null)
-            pid1_exe=$(readlink /proc/1/exe 2>/dev/null)
-            echo "T$tick os=${osid:-unknown} pid1=$pid1_comm exe=$pid1_exe"
-            sleep 1
-          done
-          echo "=== /etc/os-release says NixOS; waiting for systemd ready ==="
-          while :; do
-            state=$(timeout 10 systemctl is-system-running 2>&1 || echo "UNREACHABLE:$?")
-            echo "SYSTEM: $state"
-            case "$state" in
-              running|degraded) echo "=== OK state=$state ==="; break ;;
-            esac
-            sleep 1
-          done
-          timeout 5 systemctl --failed --no-pager 2>&1 || true
-
-      - name: Post-reboot diagnostics
-        if: always()
-        run: |
-          # No systemctl calls here. systemctl can hang indefinitely on a
-          # broken socket, which would block artifact upload. Use static
-          # file reads only — ENOENT is instant, never hangs.
-          echo "=== /etc/os-release ==="
-          cat /etc/os-release 2>&1 || echo "(ENOENT)"
-          echo "=== pid 1 comm ==="
-          cat /proc/1/comm 2>/dev/null || echo "(no pid 1??)"
-          echo "=== pid 1 exe ==="
-          readlink /proc/1/exe 2>/dev/null || echo "(no exe)"
-          echo "=== /sbin/init ==="
-          readlink -f /sbin/init 2>/dev/null || echo "(none)"
-          echo "=== /run/current-system ==="
-          readlink /run/current-system 2>/dev/null || echo "(none)"
-          echo "=== /nix/store sample ==="
-          ls /nix/store 2>/dev/null | head -5 || echo "(no /nix/store)"
-          echo "=== /run/systemd/system active ==="
-          ls /run/systemd/system/*.wants/*.target 2>/dev/null | head -10 || echo "(none)"
-          echo "=== uname ==="
-          uname -a
-          echo "=== dmesg tail ==="
-          sudo dmesg --nopager 2>/dev/null | tail -40 || true
-          echo "=== symbiote trace tail ==="
-          sudo tail -300 /var/log/symbiote/trace.log 2>/dev/null || echo "no trace"
-          echo "=== symbiote watchdog tail ==="
-          sudo tail -200 /var/log/symbiote/watchdog.log 2>/dev/null || echo "no watchdog"
-          echo "=== symbiote journal tail ==="
-          sudo tail -100 /var/log/symbiote/journal.log 2>/dev/null || echo "no journal"
-
-      - name: Smoke-test (hello runs)
-        if: success()
-        run: |
+          # Post-pivot the userland is NixOS; coreutils/etc. resolve via the
+          # FHS compatibility layer (see system.nix). The symbiote only returns
+          # after systemd reports `running`, so no polling needed here.
+          osid=$(sed -n 's/^ID=//p' /etc/os-release)
+          echo "OS=$osid  KERNEL=$(uname -r)"
+          test "$osid" = nixos
+          # Test 1: a plain NixOS binary runs post-pivot.
           hello
-          echo "OS=$(sed -n 's/^ID=//p' /etc/os-release)"
-
-      - name: Proof of pivot (fastfetch)
-        if: success()
-        run: |
-          # Visual proof the userland is NixOS while the kernel is still the
-          # host's Ubuntu kernel (soft-reboot keeps the kernel). Expect
-          # `OS: NixOS` + `Kernel: *-azure` (or similar) in one panel.
+          # Proof-of-pivot panel: OS NixOS on the retained host kernel.
           fastfetch || /run/current-system/sw/bin/fastfetch
 
-      - name: Collect diagnostics for upload
-        if: always()
+      - name: Post-reboot diagnostics (on failure)
+        if: failure()
         run: |
-          # Static file copies only — never calls systemctl/journalctl which can
-          # hang. The journal files (if any) are copied via cp from on-disk paths.
-          sudo mkdir -p /tmp/symbiote-upload
-          sudo cp -a /var/log/symbiote /tmp/symbiote-upload/ 2>/dev/null || true
-          sudo cp -a /var/log/journal /tmp/symbiote-upload/var-log-journal 2>/dev/null || true
-          sudo cp -a /run/log/journal /tmp/symbiote-upload/run-log-journal 2>/dev/null || true
-          sudo dmesg --nopager > /tmp/symbiote-upload/dmesg.txt 2>&1 || true
-          sudo cp -a /home/runner/runners/*/_diag /tmp/symbiote-upload/runner-diag 2>/dev/null || true
-          sudo ls -laR /run/systemd/system 2>/dev/null > /tmp/symbiote-upload/run-systemd-system.txt || true
-          sudo chmod -R a+r /tmp/symbiote-upload || true
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: diagnostics-${{ matrix.arch }}
-          path: /tmp/symbiote-upload/
-          if-no-files-found: warn
-          retention-days: 7
-
+          # Static reads first (never hang), then a bounded systemctl.
+          cat /etc/os-release 2>&1 || echo "(no /etc/os-release)"
+          cat /proc/1/comm 2>/dev/null; readlink /proc/1/exe 2>/dev/null
+          readlink /run/current-system 2>/dev/null || echo "(no current-system)"
+          sudo dmesg --nopager 2>/dev/null | tail -60 || true
+          timeout 10 sudo systemctl --failed --no-pager 2>&1 || true
+          timeout 10 sudo systemctl status --no-pager -n0 2>&1 | head -20 || true

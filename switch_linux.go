@@ -639,8 +639,7 @@ func softReboot(newRoot, system string) error {
 		exit := cmd.ProcessState.ExitCode()
 		if state == "running" {
 			trace("reboot", "phase 2 done after %d polls: state=running", i)
-			postPivotInspect(systemdPkg, system)
-			return nil
+			return postPivotInspect(systemdPkg, system)
 		}
 		if state == "degraded" && !triedResetFailed {
 			triedResetFailed = true
@@ -695,7 +694,12 @@ func softReboot(newRoot, system string) error {
 // without SSH/serial access to the new system. Each probe maps to a
 // hypothesis: runner alive (H1), exec/libs (H2), network/DNS (H3), TLS (H4),
 // /dev/shm+pts (H6).
-func postPivotInspect(systemdPkg, system string) {
+// postPivotInspect runs the diagnostic battery (non-gating) and then the
+// ordered acceptance suite. The acceptance checks GATE: any failure is returned
+// so the symbiote exits non-zero and CI fails. Networking is logged but not
+// gated (the named acceptance tests are hello then k3s; k3s bundles its images
+// so it needs no registry). Tests run in order: hello first, k3s second.
+func postPivotInspect(systemdPkg, system string) error {
 	// IMPORTANT: Go's exec resolves argv[0] via the CALLER's $PATH (os.Environ),
 	// NOT cmd.Env — and our PATH is stale Ubuntu post-pivot. So every command
 	// must be an ABSOLUTE path into the built system's sw/bin (we know its
@@ -723,7 +727,116 @@ func postPivotInspect(systemdPkg, system string) {
 		trace("inspect", "[%s] err=%v: %s", p.name, err, strings.TrimSpace(string(out)))
 	}
 	waitNetwork(system)
-	waitK3s(system, systemdPkg)
+
+	monitorRunner(system, systemdPkg)
+
+	// Ordered acceptance suite — hello (test 1) then k3s (test 2). Run BOTH
+	// even if the first fails, so the trace shows every result, then return a
+	// combined error if any gating check failed.
+	var failures []string
+	if err := waitHello(system); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if err := waitK3s(system, systemdPkg); err != nil {
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		trace("accept", "ACCEPTANCE FAILED: %s", strings.Join(failures, "; "))
+		return fmt.Errorf("acceptance failed: %s", strings.Join(failures, "; "))
+	}
+	trace("accept", "===== ALL ACCEPTANCE TESTS PASSED =====")
+	return nil
+}
+
+// monitorRunner is TEMPORARY debug instrumentation (active only when
+// SYMBIOTE_LOG_SINK or SYMBIOTE_MONITOR is set). After the pivot it watches the
+// GHA runner processes and hosted-compute-agent.service for a window, streaming
+// the timeline via trace() (→ stdout + the static log sink). It's the clean,
+// static replacement for the old shell watchdog: it tells us HOW and WHEN the
+// aarch64 runner dies (signalled vs. vanished vs. deprovisioned) without the
+// fragile systemd-run units that drove the system `degraded`.
+func monitorRunner(system, systemdPkg string) {
+	if os.Getenv("SYMBIOTE_LOG_SINK") == "" && os.Getenv("SYMBIOTE_MONITOR") == "" {
+		return
+	}
+	systemctl := filepath.Join(systemdPkg, "bin/systemctl")
+	journalctl := filepath.Join(systemdPkg, "bin/journalctl")
+	show := func(unit, prop string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		out, _ := exec.CommandContext(ctx, systemctl, "show", "-p", prop, "--value", unit).CombinedOutput()
+		return strings.TrimSpace(string(out))
+	}
+	// Condition-based: we watch WHILE the runner is alive and stop the moment
+	// it's confirmed gone (the event we're hunting) — the fixed cap is only a
+	// backstop so we don't outlive the activator-step budget. NOTE: this only
+	// sees deaths within the symbiote's own lifetime; the observed aarch64
+	// death is ~11 min out, which needs a detached monitor (--monitor mode).
+	const capSecs = 90
+	trace("monitor", "===== post-pivot runner monitor (watch until death, cap %ds) =====", capSecs)
+	dump := func(label string, argv ...string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		out, _ := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		trace("monitor", "[%s]\n%s", label, strings.TrimSpace(string(out)))
+	}
+	for i := 0; i < capSecs; i++ {
+		runners := runnerPids()
+		if i%5 == 0 {
+			trace("monitor", "t=%ds runners=%v hosted-compute-agent=%s/%s", i, runners,
+				show("hosted-compute-agent.service", "ActiveState"),
+				show("hosted-compute-agent.service", "SubState"))
+		}
+		if len(runners) == 0 {
+			trace("monitor", "*** RUNNER GONE at t=%ds — capturing cause ***", i)
+			dump("hosted-compute-agent journal", journalctl, "-u", "hosted-compute-agent.service", "--no-pager", "-n", "60", "-b")
+			dump("kill/term/oom in journal", journalctl, "--no-pager", "-n", "200", "-b", "-g", "kill|SIGTERM|SIGKILL|oom|reap|terminat|deprovision|unhealthy")
+			dump("dmesg tail", filepath.Join(system, "sw/bin/dmesg"), "--nopager")
+			return // condition met — done
+		}
+		time.Sleep(1 * time.Second)
+	}
+	trace("monitor", "===== runner alive through %ds window =====", capSecs)
+}
+
+// runnerPids returns the PIDs of live GHA runner processes (Listener/Worker),
+// read straight from /proc so it needs no external tools.
+func runnerPids() []int {
+	var out []int
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		cmd, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		s := string(cmd)
+		if strings.Contains(s, "Runner.Listener") || strings.Contains(s, "Runner.Worker") {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// waitHello is acceptance test 1: a plain NixOS package must execute post-pivot.
+// Proves the pivoted userspace really is NixOS (store paths resolve, the binary
+// runs, /nix is mounted). Skips if hello isn't in the closure (e.g. minimal).
+func waitHello(system string) error {
+	hello := filepath.Join(system, "sw/bin/hello")
+	if _, err := os.Stat(hello); err != nil {
+		trace("hello", "hello not in closure — skipping (config has no pkgs.hello)")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, hello).CombinedOutput()
+	got := strings.TrimSpace(string(out))
+	if err != nil || !strings.Contains(got, "Hello, world!") {
+		trace("hello", "FAILED: err=%v out=%q", err, got)
+		return fmt.Errorf("hello: err=%v out=%q", err, got)
+	}
+	trace("hello", "*** HELLO OK: %q ***", got)
+	return nil
 }
 
 // waitNetwork is the networking acceptance probe (user's #1 priority): after the
@@ -761,16 +874,17 @@ func waitNetwork(system string) {
 	trace("net", "FAILED: no external connectivity within %ds", deadline)
 }
 
-// waitK3s is the acceptance test: on the pivoted NixOS, k3s must start and the
+// waitK3s is acceptance test 2: on the pivoted NixOS, k3s must start and the
 // single node must report Ready. The kube-apiserver needs a warmup after the
-// service goes active, so poll with retries. Writes progress to the trace.
-func waitK3s(system, systemdPkg string) {
+// service goes active, so poll with retries. Returns an error (gating) if the
+// node never reaches Ready; skips (nil) if k3s isn't in the closure.
+func waitK3s(system, systemdPkg string) error {
 	k3s := filepath.Join(system, "sw/bin/k3s")
 	systemctl := filepath.Join(systemdPkg, "bin/systemctl")
 	journalctl := filepath.Join(systemdPkg, "bin/journalctl")
 	if _, err := os.Stat(k3s); err != nil {
 		trace("k3s", "k3s not in system closure — skipping (config has no services.k3s)")
-		return
+		return nil
 	}
 	trace("k3s", "===== waiting for k3s node Ready =====")
 	// All commands by ABSOLUTE path — Go's exec resolves argv[0] via the
@@ -788,7 +902,7 @@ func waitK3s(system, systemdPkg string) {
 			trace("k3s", "*** NODE READY after %ds ***\n%s", i, nodes)
 			pods, _ := run(10*time.Second, k3s, "kubectl", "get", "pods", "-A", "--no-headers")
 			trace("k3s", "system pods:\n%s", pods)
-			return
+			return nil
 		}
 		if i%10 == 0 {
 			active, _ := run(5*time.Second, systemctl, "is-active", "k3s")
@@ -799,6 +913,7 @@ func waitK3s(system, systemdPkg string) {
 	trace("k3s", "FAILED: node not Ready within %ds", deadline)
 	jlog, _ := run(10*time.Second, journalctl, "-u", "k3s", "--no-pager", "-n", "40")
 	trace("k3s", "k3s journal tail:\n%s", jlog)
+	return fmt.Errorf("k3s: node not Ready within %ds", deadline)
 }
 
 // dumpPrePivot writes everything we might need to understand a pivot
