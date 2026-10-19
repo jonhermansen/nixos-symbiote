@@ -37,18 +37,60 @@ in
         { device = rootDevice; fsType = rootFsType; options = [ "x-mount.subdir=nix" ]; }
     );
 
-    # Tiny /bin/sh — busybox ash. Keeps the symbiote footprint minimal.
-    environment.binsh = "${pkgs.busybox}/bin/sh";
-    # GitHub Actions Worker exec's /bin/bash --noprofile --norc for every
-    # step shell. NixOS doesn't put bash at /bin/bash by default — all
-    # binaries live in /nix/store. Without this, Worker's execve returns
-    # ENOENT and the whole step hangs. Create fixed-path symlinks via
-    # activation.
-    environment.systemPackages = lib.mkBefore [ pkgs.busybox pkgs.bash ];
-    system.activationScripts.binBash = ''
-      ln -sfn ${pkgs.bash}/bin/bash /bin/bash
-      mkdir -p /usr/bin
-      ln -sfn ${pkgs.bash}/bin/bash /usr/bin/bash
+    # --- Host the GitHub Actions runner's FOREIGN binaries across the pivot ---
+    # The runner (Runner.Listener/.Worker) and its step shells keep running
+    # after the soft-reboot, still expecting an Ubuntu userland. NixOS provides
+    # none of it by default, so they fail to exec. We bring working, self-
+    # contained binaries (nixpkgs builds, patchelf'd to the store loader —
+    # NOT an nix-ld shim) and put them where the runner looks.
+    #
+    # (1) A GNU userland at the FHS paths step shells use. GHA Worker exec's
+    #     `bash --noprofile --norc` with an Ubuntu PATH (/usr/bin:/bin); after
+    #     the pivot those dirs are NixOS and lack bash/date/sleep/tr/pgrep →
+    #     "command not found" (and, with sleep gone, hot-spin loops that burned
+    #     15 min + 2.6 GB of logs). These resolve via PATH, so symlinking the
+    #     GNU userland into /usr/bin and /bin is enough. /bin/sh is dash — the
+    #     SAME shell Ubuntu uses for /bin/sh, so #!/bin/sh scripts behave
+    #     identically (busybox ash would subtly differ, GNU is what the runner
+    #     assumes everywhere else).
+    environment.binsh = "${pkgs.dash}/bin/dash";
+    environment.systemPackages = lib.mkBefore [
+      pkgs.bash pkgs.dash pkgs.coreutils pkgs.procps pkgs.gnugrep
+      pkgs.gnused pkgs.gawk pkgs.findutils pkgs.gnutar pkgs.gzip pkgs.util-linux
+    ];
+    system.activationScripts.runnerFhs = let
+      userland = pkgs.buildEnv {
+        name = "symbiote-fhs-userland";
+        paths = with pkgs; [
+          bash coreutils procps gnugrep gnused gawk findutils gnutar gzip
+          util-linux which
+        ];
+        ignoreCollisions = true;
+      };
+    in ''
+      mkdir -p /usr/bin /bin
+      for f in ${userland}/bin/*; do
+        b=$(basename "$f")
+        ln -sfn "$f" "/usr/bin/$b"
+        ln -sfn "$f" "/bin/$b"
+      done
+    '';
+
+    # (2) node: the runner executes every JS action (checkout, upload-artifact,
+    #     ...) with its OWN bundled node by ABSOLUTE path, so PATH doesn't help.
+    #     That node is dynamically linked against glibc at Ubuntu paths and
+    #     can't start on NixOS ("Could not start dynamically linked
+    #     executable"). Replace it in place with nixpkgs node — same major, but
+    #     patchelf'd to the store loader so it runs natively, no nix-ld. Also
+    #     drop a node on PATH for steps that call it directly.
+    system.activationScripts.runnerNode = ''
+      for nd in /home/*/actions-runner/cached/*/externals/node*/bin/node \
+                /home/*/runners/*/externals/node*/bin/node \
+                /opt/*/externals/node*/bin/node; do
+        [ -e "$nd" ] || continue
+        ln -sfn ${pkgs.nodejs_24}/bin/node "$nd"
+      done
+      ln -sfn ${pkgs.nodejs_24}/bin/node /usr/bin/node
     '';
 
     # NOTE: do NOT set LogTarget=console with LogLevel=debug here. The QEMU
