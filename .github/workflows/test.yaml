@@ -78,16 +78,18 @@ jobs:
 
       - name: Verify NixOS + smoke tests
         run: |
-          # Post-pivot the userland is NixOS; coreutils/etc. resolve via the
-          # FHS compatibility layer (see system.nix). The symbiote only returns
-          # after systemd reports `running`, so no polling needed here.
+          # Post-pivot the userland is NixOS. The FHS layer puts the general
+          # userland (coreutils/bash/…) on /usr/bin, but config packages (hello,
+          # fastfetch) live in the system profile — put it on PATH so bare names
+          # resolve. The symbiote only returns after systemd reports `running`.
+          export PATH="/run/current-system/sw/bin:$PATH"
           osid=$(sed -n 's/^ID=//p' /etc/os-release)
           echo "OS=$osid  KERNEL=$(uname -r)"
           test "$osid" = nixos
           # Test 1: a plain NixOS binary runs post-pivot.
           hello
           # Proof-of-pivot panel: OS NixOS on the retained host kernel.
-          fastfetch || /run/current-system/sw/bin/fastfetch
+          fastfetch
 
       - name: Post-reboot diagnostics (on failure)
         if: failure()
