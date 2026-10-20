@@ -756,7 +756,13 @@ func postPivotInspect(systemdPkg, system string) error {
 // aarch64 runner dies (signalled vs. vanished vs. deprovisioned) without the
 // fragile systemd-run units that drove the system `degraded`.
 func monitorRunner(system, systemdPkg string) {
-	if os.Getenv("SYMBIOTE_LOG_SINK") == "" && os.Getenv("SYMBIOTE_MONITOR") == "" {
+	// Off unless EXPLICITLY requested. Keeping the symbiote alive for the
+	// monitor window exposes a protection-scope teardown hang (systemd-run
+	// --scope loses its D-Bus link to the pre-pivot systemd and never observes
+	// our exit; SurviveFinalKillSignal then makes the step un-killable). So
+	// don't tie this to SYMBIOTE_LOG_SINK — only run it when deliberately
+	// debugging, via SYMBIOTE_MONITOR.
+	if os.Getenv("SYMBIOTE_MONITOR") == "" {
 		return
 	}
 	systemctl := filepath.Join(systemdPkg, "bin/systemctl")
