@@ -15,9 +15,16 @@ jobs:
           - runner: ubuntu-24.04
             arch: x86_64
             flake-attr: linux-amd64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
-            flake-attr: linux-arm64
+          # aarch64 lane TEMPORARILY disabled. The pivot itself works on
+          # aarch64 (phase2 running, net up, exit 0), but the GitHub *hosted*
+          # arm runner uses the newer ephemeral model with
+          # hosted-compute-agent.service, which reaps the VM minutes after the
+          # host becomes NixOS — the runner process disappears and the job
+          # hangs to the timeout. Under investigation (likely needs a
+          # self-hosted arm runner). x86_64 is fully green. Re-enable to debug.
+          # - runner: ubuntu-24.04-arm
+          #   arch: aarch64
+          #   flake-attr: linux-arm64
           # riscv64 test lane DISABLED — permanently, not a capacity issue.
           # The RISE RISC-V runner runs the job inside a Kubernetes pod /
           # containerd container (PID 1 = docker-init/tini, no systemd), and
@@ -79,22 +86,13 @@ jobs:
       - name: Verify NixOS + smoke tests
         run: |
           osid=$(sed -n 's/^ID=//p' /etc/os-release)
-          echo "OS=$osid  KERNEL=$(uname -r)"
+          echo "OS=$osid  KERNEL=$(uname -r)"   # proof of pivot: NixOS on host kernel
           test "$osid" = nixos
-          # Locate the NixOS system profile — report the candidates so we see
-          # exactly where the closure's sw/bin lives post-pivot.
-          echo "== /run/current-system -> $(readlink -f /run/current-system 2>&1)"
-          echo "== /nix/var/nix/profiles/system -> $(readlink -f /nix/var/nix/profiles/system 2>&1)"
-          echo "== /etc/profiles/per-user -> $(ls -d /etc/profiles 2>&1)"
-          for d in /run/current-system/sw/bin /nix/var/nix/profiles/system/sw/bin; do
-            echo "== $d/hello: $(ls -l "$d"/hello 2>&1)"
-          done
-          echo "== hello in store sw/bin:"; find /nix/store -maxdepth 3 -path '*/sw/bin/hello' 2>/dev/null | head -3
-          # Put every real candidate on PATH, then run the smoke tests.
+          # NixOS system profile on PATH (current-system is now fixed to resolve
+          # post-pivot; the profile path is kept as a belt-and-suspenders).
           export PATH="/run/current-system/sw/bin:/nix/var/nix/profiles/system/sw/bin:$PATH"
-          command -v hello || { echo "hello still not found"; exit 1; }
-          hello
-          fastfetch
+          hello                                   # test 1: a NixOS binary runs
+          fastfetch                               # proof-of-pivot panel
 
       - name: Post-reboot diagnostics (on failure)
         if: failure()

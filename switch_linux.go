@@ -40,6 +40,17 @@ func switchSystem(nixBin, system string) error {
 		log.Fatalf("profile symlink: %v", err)
 	}
 
+	// soft-reboot preserves the HOST's /run unmodified, and it SHADOWS the
+	// newRoot/run that `activate` writes into — so the /run/current-system that
+	// activate creates is discarded and the standard NixOS path is absent
+	// post-pivot. Create it in the host /run (which becomes the live /run)
+	// pointing at the persistent profile, so /run/current-system resolves after
+	// the pivot for everything that expects it.
+	os.Remove("/run/current-system")
+	if err := os.Symlink("/nix/var/nix/profiles/system", "/run/current-system"); err != nil {
+		trace("start", "host /run/current-system symlink: %v (continuing)", err)
+	}
+
 	protected := protectedUnits()
 	trace("protect", "units=%v", protected)
 
