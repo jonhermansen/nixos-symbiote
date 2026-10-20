@@ -78,17 +78,22 @@ jobs:
 
       - name: Verify NixOS + smoke tests
         run: |
-          # Post-pivot the userland is NixOS. The FHS layer puts the general
-          # userland (coreutils/bash/…) on /usr/bin, but config packages (hello,
-          # fastfetch) live in the system profile — put it on PATH so bare names
-          # resolve. The symbiote only returns after systemd reports `running`.
-          export PATH="/run/current-system/sw/bin:$PATH"
           osid=$(sed -n 's/^ID=//p' /etc/os-release)
           echo "OS=$osid  KERNEL=$(uname -r)"
           test "$osid" = nixos
-          # Test 1: a plain NixOS binary runs post-pivot.
+          # Locate the NixOS system profile — report the candidates so we see
+          # exactly where the closure's sw/bin lives post-pivot.
+          echo "== /run/current-system -> $(readlink -f /run/current-system 2>&1)"
+          echo "== /nix/var/nix/profiles/system -> $(readlink -f /nix/var/nix/profiles/system 2>&1)"
+          echo "== /etc/profiles/per-user -> $(ls -d /etc/profiles 2>&1)"
+          for d in /run/current-system/sw/bin /nix/var/nix/profiles/system/sw/bin; do
+            echo "== $d/hello: $(ls -l "$d"/hello 2>&1)"
+          done
+          echo "== hello in store sw/bin:"; find /nix/store -maxdepth 3 -path '*/sw/bin/hello' 2>/dev/null | head -3
+          # Put every real candidate on PATH, then run the smoke tests.
+          export PATH="/run/current-system/sw/bin:/nix/var/nix/profiles/system/sw/bin:$PATH"
+          command -v hello || { echo "hello still not found"; exit 1; }
           hello
-          # Proof-of-pivot panel: OS NixOS on the retained host kernel.
           fastfetch
 
       - name: Post-reboot diagnostics (on failure)
